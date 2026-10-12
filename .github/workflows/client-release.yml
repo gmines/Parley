@@ -3,10 +3,9 @@
 #   Windows setup .exe (NSIS) and .msi
 #   macOS   universal .dmg / .app (Apple Silicon + Intel)
 #
-# Push a tag like `client-v0.1.0` to build and attach the installers to a
-# *draft* GitHub release (publish it by hand after checking it). Run the
-# workflow manually ("Run workflow") to just build and download the
-# installers from the run's artifacts.
+# Push a tag like `client-v0.1.0` to build the installers and publish them as
+# a GitHub pre-release. Run the workflow manually ("Run workflow") to just
+# build and download the installers from the run's artifacts.
 #
 # Code signing is not configured yet, so Windows SmartScreen and macOS
 # Gatekeeper will warn on first launch. See the commented env blocks below.
@@ -18,7 +17,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write # create the draft release
+  contents: write # create the release
 
 jobs:
   test:
@@ -121,9 +120,16 @@ jobs:
           projectPath: client
           args: ${{ matrix.args }}
           uploadWorkflowArtifacts: true
-          # Only tag pushes create a (draft) release; manual runs just upload artifacts.
+          # Only tag pushes create a release; manual runs just upload artifacts.
           tagName: ${{ startsWith(github.ref, 'refs/tags/client-v') && github.ref_name || '' }}
           releaseName: "Parley ${{ github.ref_name }}"
-          releaseBody: "Desktop installers for Windows, macOS and Linux. Draft: check the downloads before publishing."
-          releaseDraft: true
+          releaseBody: |
+            Desktop installers for Parley.
+
+            - **Windows:** `Parley_*_x64-setup.exe` (installs for your user, no admin needed) or `.msi`
+            - **macOS:** `Parley_*_universal.dmg` (Apple Silicon and Intel, macOS 11+)
+            - **Linux:** `.deb` (Debian/Ubuntu), `.rpm` (Fedora/RHEL) or `.AppImage` (any distro)
+
+            These builds are not code-signed yet. Windows SmartScreen may say "Windows protected your PC": click **More info → Run anyway**. On macOS, if it says the app "is damaged" or "can't be opened", run `xattr -dr com.apple.quarantine /Applications/Parley.app` in Terminal, or right-click the app → **Open**.
+          releaseDraft: false
           prerelease: true
