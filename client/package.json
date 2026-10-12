@@ -1,0 +1,20 @@
+{
+  "name": "parley-client",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "typecheck": "tsc --noEmit",
+    "tauri": "tauri"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "2.12.3"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "2.12.2",
+    "typescript": "7.0.2",
+    "vite": "8.3.4"
+  }
+}

@@ -1,0 +1,10 @@
+/bin/
+/out/
+*.test
+*.out
+.env
+.env.*
+
+# Tauri / Rust (client, later milestones)
+/client/**/target/
+/client/**/node_modules/

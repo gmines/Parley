@@ -1,0 +1,410 @@
+openapi: 3.1.0
+info:
+  title: Parley API
+  version: 0.1.0
+  description: |
+    REST API served by the `api` service. Realtime events (new messages,
+    friend updates, presence, call signalling) arrive over the `realtime`
+    service's WebSocket; see events.md.
+
+    Authenticated endpoints take `Authorization: Bearer <access_token>`.
+    Access tokens are short-lived Ed25519 JWTs; renew with /v1/auth/refresh.
+    Refresh tokens are single-use. Presenting a used one revokes the whole
+    session (stolen-token detection), so clients must store the new refresh
+    token from every refresh response.
+servers:
+  - url: http://localhost:8080
+security:
+  - bearer: []
+
+paths:
+  /v1/auth/register:
+    post:
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [username, password]
+              properties:
+                username: { type: string, pattern: '^[a-zA-Z0-9_.]{2,32}$', description: Stored lowercased }
+                password:
+                  type: string
+                  minLength: 8
+                  maxLength: 128
+                  description: |
+                    Must not be easy to guess (zxcvbn score >= 3): common passwords,
+                    sequences, keyboard patterns and passwords built from the
+                    username or display name are rejected with `weak_password`,
+                    whose message says why. No character-class rules.
+                display_name: { type: string, maxLength: 32, description: Defaults to username }
+                email: { type: string, description: 'Optional recovery email. Only accepted when email recovery is enabled (else 403 feature_disabled). A verification code is sent to it.' }
+                phone: { type: string, description: 'Optional recovery phone, E.164 (+15551234567). Only accepted when SMS recovery is enabled.' }
+      responses:
+        '201': { $ref: '#/components/responses/Session' }
+        '400': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+  /v1/auth/login:
+    post:
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [username, password]
+              properties:
+                username: { type: string }
+                password: { type: string }
+      description: |
+        Subject to lockout: by default 5 failures within 15 minutes from one IP
+        lock that IP out of the account for 5 minutes, and 20 failures from any
+        IPs lock the account (configurable; see services/api/config.go). Locked
+        requests get 429 `too_many_attempts` with a Retry-After header, even
+        with the right password. Unknown usernames are counted the same way.
+      responses:
+        '200': { $ref: '#/components/responses/Session' }
+        '401': { $ref: '#/components/responses/Error' }
+        '429': { $ref: '#/components/responses/Error' }
+  /v1/auth/refresh:
+    post:
+      security: []
+      requestBody: { $ref: '#/components/requestBodies/RefreshToken' }
+      responses:
+        '200': { $ref: '#/components/responses/Session' }
+        '401': { $ref: '#/components/responses/Error' }
+  /v1/auth/logout:
+    post:
+      security: []
+      description: Revokes the session the refresh token belongs to.
+      requestBody: { $ref: '#/components/requestBodies/RefreshToken' }
+      responses:
+        '204': { description: Logged out }
+
+  /v1/users/me:
+    get:
+      responses:
+        '200':
+          description: The caller
+          content: { application/json: { schema: { $ref: '#/components/schemas/User' } } }
+        '401': { $ref: '#/components/responses/Error' }
+
+  /v1/auth/features:
+    get:
+      security: []
+      summary: Optional flows enabled on this server
+      responses:
+        '200':
+          description: Enabled features
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  email_recovery: { type: boolean }
+                  sms_recovery: { type: boolean }
+  /v1/auth/password-reset/request:
+    post:
+      security: []
+      summary: Send a password reset code
+      description: |
+        Sends a 6-digit code (valid 15 minutes, 5 guesses) to the account's
+        *verified* email or phone. Always answers 202, whether or not the
+        account exists, has that contact, or is rate limited (1 code per
+        minute, 5 per hour), so it can't be used to probe accounts.
+        403 `feature_disabled` if the channel isn't enabled.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [username, channel]
+              properties:
+                username: { type: string }
+                channel: { type: string, enum: [email, sms] }
+      responses:
+        '202': { description: Accepted }
+        '400': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+  /v1/auth/password-reset/confirm:
+    post:
+      security: []
+      summary: Set a new password with a reset code
+      description: Signs the account out everywhere and clears any login lockout. A weak new password (400 weak_password) leaves the code usable.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [username, code, new_password]
+              properties:
+                username: { type: string }
+                code: { type: string }
+                new_password: { type: string }
+      responses:
+        '204': { description: Password changed }
+        '400': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+
+  /v1/users/me/password:
+    post:
+      summary: Change password
+      description: Requires the current password (wrong guesses count towards lockout). Revokes all sessions and returns a new one for the caller.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [current_password, new_password]
+              properties:
+                current_password: { type: string }
+                new_password: { type: string }
+      responses:
+        '200': { $ref: '#/components/responses/Session' }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '429': { $ref: '#/components/responses/Error' }
+  /v1/users/me/{contact}:
+    parameters:
+      - { name: contact, in: path, required: true, schema: { type: string, enum: [email, phone] } }
+    put:
+      summary: Set recovery email or phone
+      description: Stored unverified; a verification code is sent to it. Requires the current password. 403 feature_disabled unless that channel is enabled.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [value, password]
+              properties:
+                value: { type: string }
+                password: { type: string }
+      responses:
+        '202': { description: Code sent }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '429': { $ref: '#/components/responses/Error' }
+    delete:
+      summary: Remove recovery email or phone
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [password]
+              properties:
+                password: { type: string }
+      responses:
+        '200':
+          description: Updated user
+          content: { application/json: { schema: { $ref: '#/components/schemas/User' } } }
+  /v1/users/me/{contact}/verify:
+    parameters:
+      - { name: contact, in: path, required: true, schema: { type: string, enum: [email, phone] } }
+    post:
+      summary: Verify recovery email or phone with the code sent to it
+      description: 409 contact_in_use if another account already verified the same value.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [code]
+              properties:
+                code: { type: string }
+      responses:
+        '200':
+          description: Updated user
+          content: { application/json: { schema: { $ref: '#/components/schemas/User' } } }
+        '400': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+
+  /v1/friends:
+    get:
+      responses:
+        '200':
+          description: Friends, sorted by username
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  friends: { type: array, items: { $ref: '#/components/schemas/Friend' } }
+  /v1/friends/{userID}:
+    delete:
+      summary: Remove a friend
+      parameters: [{ $ref: '#/components/parameters/UserID' }]
+      responses:
+        '204': { description: Removed }
+        '404': { $ref: '#/components/responses/Error' }
+
+  /v1/friends/requests:
+    get:
+      responses:
+        '200':
+          description: Pending requests, newest first
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  incoming: { type: array, items: { $ref: '#/components/schemas/FriendRequest' } }
+                  outgoing: { type: array, items: { $ref: '#/components/schemas/FriendRequest' } }
+    post:
+      summary: Send a friend request by username
+      description: |
+        Re-sending a pending request returns the existing one. If the target
+        already sent the caller a request, the two become friends and
+        `friendship` is returned instead of `request`.
+        `cannot_send_request` (400) covers both "no such user" and "that user
+        blocked you", so blocks can't be detected by probing.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [username]
+              properties:
+                username: { type: string }
+      responses:
+        '200':
+          description: Request pending, or now friends
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  request: { $ref: '#/components/schemas/FriendRequest' }
+                  friendship: { $ref: '#/components/schemas/Friend' }
+        '400': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+  /v1/friends/requests/{requestID}/accept:
+    post:
+      parameters: [{ $ref: '#/components/parameters/RequestID' }]
+      responses:
+        '200':
+          description: Now friends
+          content: { application/json: { schema: { $ref: '#/components/schemas/Friend' } } }
+        '404': { $ref: '#/components/responses/Error' }
+  /v1/friends/requests/{requestID}:
+    delete:
+      summary: Decline (if incoming) or cancel (if outgoing)
+      parameters: [{ $ref: '#/components/parameters/RequestID' }]
+      responses:
+        '204': { description: Removed }
+        '404': { $ref: '#/components/responses/Error' }
+
+  /v1/blocks:
+    get:
+      responses:
+        '200':
+          description: Users the caller has blocked
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  blocked: { type: array, items: { $ref: '#/components/schemas/Blocked' } }
+  /v1/blocks/{userID}:
+    put:
+      summary: Block a user
+      description: Idempotent. Ends any friendship and deletes pending requests in both directions.
+      parameters: [{ $ref: '#/components/parameters/UserID' }]
+      responses:
+        '204': { description: Blocked }
+        '400': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+    delete:
+      summary: Unblock a user
+      description: Idempotent. Does not restore a previous friendship.
+      parameters: [{ $ref: '#/components/parameters/UserID' }]
+      responses:
+        '204': { description: Unblocked }
+
+components:
+  securitySchemes:
+    bearer: { type: http, scheme: bearer, bearerFormat: JWT }
+  parameters:
+    UserID: { name: userID, in: path, required: true, schema: { type: string, format: uuid } }
+    RequestID: { name: requestID, in: path, required: true, schema: { type: string, format: uuid } }
+  requestBodies:
+    RefreshToken:
+      required: true
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [refresh_token]
+            properties:
+              refresh_token: { type: string }
+  responses:
+    Session:
+      description: A new session
+      content: { application/json: { schema: { $ref: '#/components/schemas/Session' } } }
+    Error:
+      description: Error
+      content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+  schemas:
+    User:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        username: { type: string }
+        display_name: { type: string }
+        created_at: { type: string, format: date-time }
+        email: { type: string, description: Only present for your own account }
+        email_verified: { type: boolean }
+        phone: { type: string }
+        phone_verified: { type: boolean }
+    UserRef:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        username: { type: string }
+        display_name: { type: string }
+    Session:
+      type: object
+      properties:
+        user: { $ref: '#/components/schemas/User' }
+        access_token: { type: string }
+        access_expires_at: { type: string, format: date-time }
+        refresh_token: { type: string }
+        refresh_expires_at: { type: string, format: date-time }
+    Friend:
+      type: object
+      properties:
+        user: { $ref: '#/components/schemas/UserRef' }
+        since: { type: string, format: date-time }
+    FriendRequest:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        from: { $ref: '#/components/schemas/UserRef' }
+        to: { $ref: '#/components/schemas/UserRef' }
+        created_at: { type: string, format: date-time }
+    Blocked:
+      type: object
+      properties:
+        user: { $ref: '#/components/schemas/UserRef' }
+        blocked_at: { type: string, format: date-time }
+    Error:
+      type: object
+      properties:
+        code:
+          type: string
+          examples: [invalid_username, weak_password, too_many_attempts, feature_disabled, invalid_email, invalid_phone,
+                     invalid_code, contact_in_use, too_many_codes, invalid_channel, username_taken, bad_credentials, invalid_refresh_token,
+                     cannot_send_request, already_friends, you_blocked_user, request_not_found,
+                     not_friends, user_not_found, self, unauthorized, bad_request]
+        message: { type: string }
