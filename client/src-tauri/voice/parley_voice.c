@@ -127,6 +127,8 @@ int pv_init(const pv_options *opt, pv_event_cb cb, void *ctx) {
     if (g_started) return 0;
     g_cb = cb;
     g_ctx = ctx;
+    /* Apply the log level before pjsua_create(), which logs on its own. */
+    pj_log_set_level(opt ? opt->log_level : 3);
     if (pjsua_create() != PJ_SUCCESS) return -1;
     ensure_thread();
 

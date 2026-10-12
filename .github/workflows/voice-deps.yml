@@ -1,0 +1,73 @@
+# Builds the desktop client's native voice libraries (Opus + pjproject) on
+# each OS and links the voiceprobe test tool against them. A quick check for
+# changes to client/scripts/build-voice-deps.* without a full release build.
+name: voice-deps
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - client/scripts/build-voice-deps.*
+      - client/src-tauri/build.rs
+      - client/src-tauri/voice/**
+      - .github/workflows/voice-deps.yml
+
+jobs:
+  deps:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: ubuntu-22.04
+          - platform: windows-latest
+          - platform: macos-latest
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Linux packages
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libasound2-dev libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev libdbus-1-dev patchelf
+      - uses: microsoft/setup-msbuild@v3
+        if: runner.os == 'Windows'
+
+      - name: Build voice libraries (Linux)
+        if: runner.os == 'Linux'
+        run: client/scripts/build-voice-deps.sh
+      - name: Build voice libraries (macOS, both architectures)
+        if: runner.os == 'macOS'
+        run: |
+          VOICE_DEPS_ARCH=arm64 client/scripts/build-voice-deps.sh
+          VOICE_DEPS_ARCH=x86_64 client/scripts/build-voice-deps.sh
+      - name: Build voice libraries (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: client/scripts/build-voice-deps.ps1
+
+      - name: Build logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: voice-deps-logs-${{ runner.os }}
+          path: |
+            client/.deps/*/src/*.log
+            client/.deps/*/src/pj/config.log
+          if-no-files-found: ignore
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ runner.os == 'macOS' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
+      - name: Link the voice engine (voiceprobe)
+        shell: bash
+        working-directory: client/src-tauri
+        run: |
+          # tauri's build script wants the frontend dist directory to exist
+          mkdir -p ../dist
+          if [ "$RUNNER_OS" = macOS ]; then
+            cargo build --bin voiceprobe --target aarch64-apple-darwin
+            cargo build --bin voiceprobe --target x86_64-apple-darwin
+          else
+            cargo build --bin voiceprobe
+          fi

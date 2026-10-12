@@ -40,10 +40,16 @@
     ],
     "linux": {
       "deb": {
-        "section": "net"
+        "section": "net",
+        "depends": [
+          "libasound2"
+        ]
       },
       "rpm": {
-        "release": "1"
+        "release": "1",
+        "depends": [
+          "alsa-lib"
+        ]
       }
     },
     "windows": {
@@ -57,7 +63,8 @@
       }
     },
     "macOS": {
-      "minimumSystemVersion": "11.0"
+      "minimumSystemVersion": "11.0",
+      "entitlements": "entitlements.plist"
     }
   }
 }

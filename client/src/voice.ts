@@ -408,8 +408,8 @@ async function devicesDialog() {
   const saved = savedDevices();
   const select = (kind: "inputs" | "outputs", current: string | null) => {
     const s = h("select", { class: "select" }, h("option", { text: "System default", attrs: { value: "" } }));
-    for (const d of devices.filter((x) => x[kind] > 0)) {
-      const o = h("option", { text: d.name, attrs: { value: d.name } });
+    for (const d of devices.filter((x) => x[kind] > 0 && friendlyName(x.name) !== null)) {
+      const o = h("option", { text: friendlyName(d.name)!, attrs: { value: d.name } });
       if (d.name === current) o.selected = true;
       s.append(o);
     }
@@ -447,4 +447,19 @@ async function devicesDialog() {
   });
   document.body.append(dialog);
   dialog.showModal();
+}
+
+/** Readable device names. On Linux, ALSA lists every card several times
+ * (surround51:..., iec958:..., front:...): keep one entry per card. Returns
+ * null for entries to hide. */
+function friendlyName(name: string): string | null {
+  if (/^(surround\d+|iec958|front|dmix|dsnoop|hw|plughw|null|lavrate|samplerate|speexrate|upmix|vdownmix|usbstream):/i.test(name)) return null;
+  const card = name.match(/^sysdefault:CARD=(.+)$/);
+  if (card) return card[1];
+  const hdmi = name.match(/^hdmi:CARD=([^,]+),DEV=(\d+)$/);
+  if (hdmi) return `${hdmi[1]} output ${Number(hdmi[2]) + 1}`;
+  if (name === "pipewire") return "PipeWire";
+  if (name === "pulse") return "PulseAudio";
+  if (name === "default") return "ALSA default";
+  return name;
 }

@@ -22,6 +22,15 @@ fn arg(name: &str) -> Option<String> {
 }
 
 fn main() {
+    // List the sound devices the engine sees (real audio backend), then exit.
+    if std::env::args().any(|a| a == "--list-devices") {
+        let engine = Engine::start(false, 1, |_| {}).expect("start engine");
+        for d in engine.devices() {
+            println!("{:>3}  in:{} out:{}  {}", d.index, d.inputs, d.outputs, d.name);
+        }
+        engine.shutdown();
+        return;
+    }
     let creds: SipCredentials = serde_json::from_str(&arg("--creds").expect("--creds")).expect("creds JSON");
     let identity = arg("--identity").expect("--identity");
     let seconds: u64 = arg("--seconds").map_or(10, |s| s.parse().expect("--seconds"));

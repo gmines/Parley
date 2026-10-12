@@ -6,7 +6,10 @@
 # Every source tarball is pinned by SHA-256. Re-running is a no-op unless the
 # versions or options in this file change.
 #
-#   client/scripts/build-voice-deps.sh            # Linux, macOS
+#   client/scripts/build-voice-deps.sh            # Linux, macOS (host arch)
+#   VOICE_DEPS_ARCH=x86_64 client/scripts/build-voice-deps.sh   # macOS: other arch
+#                                                  (universal builds need arm64 + x86_64)
+# Windows: client/scripts/build-voice-deps.ps1
 #
 # Linux needs the ALSA headers (Fedora: alsa-lib-devel, Debian: libasound2-dev).
 set -euo pipefail
@@ -18,7 +21,14 @@ PJ_SHA256=065fe06c06788d97c35f563796d59f00ce52fe9558a52d7b490a042a966facce
 
 HERE="$(cd "$(dirname "$0")/.." && pwd)"
 OS="$(uname -s | tr '[:upper:]' '[:lower:]')"
-ARCH="$(uname -m)"
+HOST_ARCH="$(uname -m)"
+ARCH="${VOICE_DEPS_ARCH:-$HOST_ARCH}"
+HOST_FLAG=()
+if [[ "$ARCH" != "$HOST_ARCH" ]]; then
+  [[ "$OS" == darwin ]] || { echo "cross-arch builds are only supported on macOS" >&2; exit 1; }
+  # autoconf spells Apple Silicon "aarch64"
+  HOST_FLAG=(--host="$([[ "$ARCH" == arm64 ]] && echo aarch64 || echo "$ARCH")-apple-darwin")
+fi
 PREFIX="${VOICE_DEPS_PREFIX:-$HERE/.deps/$OS-$ARCH}"
 WORK="$PREFIX/src"
 STAMP="$PREFIX/.stamp"
@@ -55,12 +65,13 @@ mkdir -p "$WORK"
 export CFLAGS="-O2 -fPIC" CXXFLAGS="-O2 -fPIC"
 if [[ "$OS" == darwin ]]; then
   export MACOSX_DEPLOYMENT_TARGET="${MACOSX_DEPLOYMENT_TARGET:-11.0}"
+  export CFLAGS="$CFLAGS -arch $ARCH" CXXFLAGS="$CXXFLAGS -arch $ARCH" LDFLAGS="-arch $ARCH"
 fi
 
 echo "==> opus $OPUS_VERSION"
 fetch "https://downloads.xiph.org/releases/opus/opus-$OPUS_VERSION.tar.gz" "$OPUS_SHA256" "$WORK/opus.tgz"
 mkdir "$WORK/opus" && tar xzf "$WORK/opus.tgz" -C "$WORK/opus" --strip-components=1
-(cd "$WORK/opus" && ./configure --prefix="$PREFIX" --disable-shared --enable-static --with-pic \
+(cd "$WORK/opus" && ./configure "${HOST_FLAG[@]}" --prefix="$PREFIX" --disable-shared --enable-static --with-pic \
    --disable-doc --disable-extra-programs >/dev/null && make -j"$JOBS" >/dev/null && make install >/dev/null)
 
 echo "==> pjproject $PJ_VERSION"
@@ -70,7 +81,8 @@ cat > "$WORK/pj/pjlib/include/pj/config_site.h" <<'CFG'
 /* Parley: audio-only SIP client. */
 #define PJMEDIA_HAS_VIDEO            0
 #define PJMEDIA_HAS_SRTP             1
-#define PJ_HAS_SSL_SOCK              1
+/* No TLS sockets yet (SIP over TLS is phase 4); SRTP has its own crypto. */
+#define PJ_HAS_SSL_SOCK              0
 #define PJMEDIA_HAS_OPUS_CODEC       1
 #define PJMEDIA_HAS_G722_CODEC       1
 /* Wideband conference bridge so Opus isn't squeezed through 8 kHz. */
@@ -86,11 +98,11 @@ cat > "$WORK/pj/pjlib/include/pj/config_site.h" <<'CFG'
 #define PJSUA_MAX_CALLS              4
 #define PJSUA_MAX_ACC                4
 CFG
-(cd "$WORK/pj" && ./configure --prefix="$PREFIX" --disable-shared \
+(cd "$WORK/pj" && ./configure "${HOST_FLAG[@]}" --prefix="$PREFIX" --disable-shared --disable-ssl \
    --disable-video --disable-sdl --disable-ffmpeg --disable-v4l2 --disable-openh264 \
    --disable-libyuv --disable-vpx --disable-bcg729 \
    --disable-speex-codec --disable-gsm-codec --disable-ilbc-codec --disable-g7221-codec \
-   --with-opus="$PREFIX" --with-ssl > "$WORK/pj-configure.log" 2>&1 \
+   --with-opus="$PREFIX" > "$WORK/pj-configure.log" 2>&1 \
  && make dep > /dev/null 2>&1 && make -j"$JOBS" > "$WORK/pj-make.log" 2>&1 && make install > /dev/null)
 
 grep -E 'Using SSL|opus|alsa|ALSA|Checking sound' "$WORK/pj-configure.log" | sed 's/^/   /' || true

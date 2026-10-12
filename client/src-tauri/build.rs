@@ -47,6 +47,10 @@ fn build_voice() {
     }
     println!("cargo:rerun-if-changed={}", stamp.display());
 
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
+        return link_voice_windows(&prefix);
+    }
+
     // pjproject installs a pkg-config file listing its libraries in link order.
     let pc_path = prefix.join("lib/pkgconfig");
     let pc = |args: &[&str]| -> String {
@@ -100,6 +104,25 @@ fn build_voice() {
         for fw in ["CoreAudio", "AudioToolbox", "AudioUnit", "CoreFoundation", "CoreServices", "Security"] {
             println!("cargo:rustc-link-lib=framework={fw}");
         }
+    }
+}
+
+/// Windows: build-voice-deps.ps1 produces one combined pjproject.lib (MSBuild
+/// has no pkg-config file), plus opus.lib.
+fn link_voice_windows(prefix: &Path) {
+    cc::Build::new()
+        .file("voice/parley_voice.c")
+        .include(prefix.join("include"))
+        .define("PJ_WIN64", "1")
+        .warnings(false)
+        .compile("parley_voice");
+    println!("cargo:rustc-link-search=native={}", prefix.join("lib").display());
+    for lib in ["pjproject", "opus"] {
+        println!("cargo:rustc-link-lib=static={lib}");
+    }
+    // Sockets, audio (WMME / DirectSound / WASAPI), COM, IP helper.
+    for lib in ["ws2_32", "iphlpapi", "winmm", "dsound", "ole32", "oleaut32", "uuid", "advapi32", "user32", "ksuser"] {
+        println!("cargo:rustc-link-lib=dylib={lib}");
     }
 }
 
