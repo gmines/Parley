@@ -1,15 +1,14 @@
 // Command voice-control runs call rooms: it gives clients short-lived SIP
-// credentials to join a conversation's call, and controls Asterisk over ARI
-// to admit callers into the room's mixing bridge.
+// credentials to join a conversation's call, and controls FreeSWITCH over its
+// Event Socket to admit callers into the room's conference.
 //
 // Configuration (environment):
 //
 //	PARLEY_DATABASE_URL   the api's Postgres (read-only use: conversations, blocks). Required.
 //	PARLEY_NATS_URL       NATS for call events (call.started, ...). Required.
 //	PARLEY_VERIFY_KEY     base64 Ed25519 public key for access tokens. Required.
-//	PARLEY_ARI_URL        default "http://127.0.0.1:8088/ari"
-//	PARLEY_ARI_USER       default "parley"
-//	PARLEY_ARI_PASSWORD   Required.
+//	PARLEY_ESL_ADDR       FreeSWITCH Event Socket, default "127.0.0.1:8021"
+//	PARLEY_ESL_PASSWORD   Required.
 //	PARLEY_SIP_SECRET     shared with Kamailio. Required.
 //	PARLEY_SIP_PROXY      what clients connect to, e.g. "sip:203.0.113.5:5060;transport=tcp". Required.
 //	PARLEY_SIP_DOMAIN     host part of room URIs (default: the proxy's host)
@@ -36,8 +35,8 @@ import (
 	"parley/pkg/buildinfo"
 	"parley/pkg/db"
 	"parley/pkg/events"
-	"parley/services/voice-control/internal/ari"
 	"parley/services/voice-control/internal/calls"
+	"parley/services/voice-control/internal/esl"
 	"parley/services/voice-control/internal/server"
 )
 
@@ -73,7 +72,7 @@ func run() error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	if err := required("PARLEY_DATABASE_URL", "PARLEY_NATS_URL", "PARLEY_VERIFY_KEY", "PARLEY_ARI_PASSWORD",
+	if err := required("PARLEY_DATABASE_URL", "PARLEY_NATS_URL", "PARLEY_VERIFY_KEY", "PARLEY_ESL_PASSWORD",
 		"PARLEY_SIP_SECRET", "PARLEY_SIP_PROXY"); err != nil {
 		return err
 	}
@@ -98,13 +97,9 @@ func run() error {
 		return fmt.Errorf("connect to NATS: %w", err)
 	}
 	defer nc.Drain()
-	ariClient, err := ari.New(env("PARLEY_ARI_URL", "http://127.0.0.1:8088/ari"), env("PARLEY_ARI_USER", "parley"), os.Getenv("PARLEY_ARI_PASSWORD"))
-	if err != nil {
-		return fmt.Errorf("PARLEY_ARI_URL: %w", err)
-	}
-
-	mgr := calls.NewManager(ariClient, calls.PGDirectory{Pool: pool}, events.NATS{Conn: nc})
-	go ariClient.Run(ctx, calls.StasisApp, mgr.Resync, mgr.HandleEvent)
+	fs := esl.New(env("PARLEY_ESL_ADDR", "127.0.0.1:8021"), os.Getenv("PARLEY_ESL_PASSWORD"))
+	mgr := calls.NewManager(fs, calls.PGDirectory{Pool: pool}, events.NATS{Conn: nc})
+	go fs.Run(ctx, mgr.Resync, mgr)
 
 	srv := &server.Server{
 		Calls:     mgr,

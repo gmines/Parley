@@ -1,0 +1,22 @@
+<include>
+  <!-- The SIP user part is the room (conversation id). Calls are parked
+       until voice-control (watching CHANNEL_PARK over the Event Socket)
+       re-checks the caller and moves them into the room's conference, or
+       hangs up. Calls not admitted within park_timeout are dropped. -->
+  <context name="parley">
+    <extension name="room">
+      <condition field="destination_number" expression="^([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$">
+        <action application="set" data="parley_room=$1"/>
+        <action application="set" data="parley_user=${sip_h_X-Parley-User}"/>
+        <action application="set" data="rtp_secure_media=mandatory"/>
+        <action application="set" data="park_timeout=15"/>
+        <action application="park"/>
+      </condition>
+    </extension>
+    <extension name="unknown">
+      <condition field="destination_number" expression=".*">
+        <action application="respond" data="404"/>
+      </condition>
+    </extension>
+  </context>
+</include>

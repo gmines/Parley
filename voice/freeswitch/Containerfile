@@ -1,0 +1,63 @@
+# FreeSWITCH 1.11 for Parley: the media server. Calls arrive from Kamailio,
+# are parked, and voice-control (over the Event Socket) admits them into the
+# conversation's conference room. Built from source, every input pinned by
+# checksum. Everything in this image is open source and redistributable
+# (FreeSWITCH: MPL 1.1; sofia-sip, spandsp: LGPL 2.1; libopus: BSD).
+#
+#   podman build -f voice/freeswitch/Containerfile -t parley/freeswitch voice/freeswitch
+ARG DEBIAN=debian:bookworm-slim
+
+FROM ${DEBIAN} AS build
+ARG FS_VERSION=1.11.3
+ARG FS_SHA256=6ab49ae26f45e35d3b88ae12b5d915a10aeabafcc0fd24a427c3bab4012c9e55
+ARG SOFIA_VERSION=1.13.18
+ARG SOFIA_SHA256=d2ad4e64753a7c9843b766b8de8081d9c1d7acfaeb53c12b3aed7fdb9235766c
+ARG SPANDSP_VERSION=3.1.1
+ARG SPANDSP_SHA256=71b3f1492cd5ca3dacdaa7eb6b54f5d14e0e2267ae0a1df09a87ca93cfeb1401
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      build-essential ca-certificates curl autoconf automake libtool libtool-bin pkg-config \
+      libssl-dev libcurl4-openssl-dev libpcre2-dev libspeex-dev libspeexdsp-dev libsqlite3-dev libedit-dev \
+      uuid-dev zlib1g-dev libopus-dev libtiff-dev libjpeg-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /src
+RUN curl -fsSL https://github.com/freeswitch/sofia-sip/archive/refs/tags/v${SOFIA_VERSION}.tar.gz -o sofia.tgz \
+    && echo "${SOFIA_SHA256}  sofia.tgz" | sha256sum -c - \
+    && mkdir sofia && tar xzf sofia.tgz -C sofia --strip-components=1 \
+    && cd sofia && ./bootstrap.sh && ./configure --prefix=/usr/local >/dev/null \
+    && make -j"$(nproc)" >/dev/null && make install >/dev/null
+RUN curl -fsSL https://github.com/freeswitch/spandsp/archive/refs/tags/v${SPANDSP_VERSION}.tar.gz -o spandsp.tgz \
+    && echo "${SPANDSP_SHA256}  spandsp.tgz" | sha256sum -c - \
+    && mkdir spandsp && tar xzf spandsp.tgz -C spandsp --strip-components=1 \
+    && cd spandsp && ./bootstrap.sh && ./configure --prefix=/usr/local >/dev/null \
+    && make -j"$(nproc)" >/dev/null && make install >/dev/null && ldconfig
+RUN curl -fsSL https://github.com/signalwire/freeswitch/archive/refs/tags/v${FS_VERSION}.tar.gz -o fs.tgz \
+    && echo "${FS_SHA256}  fs.tgz" | sha256sum -c - \
+    && mkdir fs && tar xzf fs.tgz -C fs --strip-components=1
+COPY modules.conf /src/fs/modules.conf
+RUN cd fs && ./bootstrap.sh -j \
+    && PKG_CONFIG_PATH=/usr/local/lib/pkgconfig ./configure --prefix=/usr/local/freeswitch \
+         --disable-libvpx --disable-libyuv --enable-portable-binary \
+         --disable-core-pgsql-support --disable-core-odbc-support \
+    && make -j"$(nproc)" && make install \
+    && test -x /usr/local/freeswitch/bin/freeswitch \
+    && (strip --strip-unneeded /usr/local/freeswitch/bin/* /usr/local/freeswitch/lib/*.so* /usr/local/freeswitch/lib/freeswitch/mod/*.so 2>/dev/null || true) \
+    # The vanilla demo config (default users, public profiles) must never be
+    # loadable: remove it. Parley's config is rendered into conf/ at start.
+    && rm -rf /usr/local/freeswitch/etc /usr/local/freeswitch/conf /usr/local/freeswitch/include /usr/local/freeswitch/share/freeswitch/sounds
+
+FROM ${DEBIAN}
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      libssl3 libcurl4 libpcre2-8-0 libspeex1 libspeexdsp1 libsqlite3-0 libedit2 libuuid1 zlib1g \
+      libopus0 libtiff6 libjpeg62-turbo gettext-base ca-certificates \
+    && rm -rf /var/lib/apt/lists/* \
+    && useradd --system --home-dir /usr/local/freeswitch freeswitch
+COPY --from=build /usr/local/lib/ /usr/local/lib/
+COPY --from=build /usr/local/freeswitch/ /usr/local/freeswitch/
+RUN ldconfig && rm -rf /usr/local/lib/*.a /usr/local/lib/pkgconfig \
+    && mkdir -p /usr/local/freeswitch/conf /usr/local/freeswitch/log /usr/local/freeswitch/run /usr/local/freeswitch/db \
+    && chown -R freeswitch:freeswitch /usr/local/freeswitch
+COPY conf/ /usr/share/parley-freeswitch/
+COPY entrypoint.sh /usr/local/bin/entrypoint.sh
+USER freeswitch
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]

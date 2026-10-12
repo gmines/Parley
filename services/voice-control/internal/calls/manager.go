@@ -1,10 +1,10 @@
 // Package calls runs Parley's voice calls. Every DM and group has one call
-// room: an Asterisk mixing bridge. Clients join by dialing the room through
-// Kamailio with credentials from Join; Asterisk hands each call to this
-// package over ARI (Stasis), which re-checks who's calling, answers, and puts
-// the channel into the room's bridge. Rooms disappear when the last person
-// leaves. Membership changes are announced to conversation members as
-// realtime events.
+// room, a conference on the media server (FreeSWITCH). Clients join by
+// dialing the room through Kamailio with credentials from the REST API; the
+// media server parks each arriving call and reports it, this package
+// re-checks who's calling and admits them into the room (or hangs up).
+// Rooms disappear when the last person leaves. Membership changes are
+// announced to the conversation's members as realtime events.
 package calls
 
 import (
@@ -19,31 +19,38 @@ import (
 	"github.com/google/uuid"
 
 	"parley/pkg/events"
-	"parley/services/voice-control/internal/ari"
 )
 
-const (
-	StasisApp     = "parley"
-	bridgePrefix  = "parley-"
-	userVariable  = "PARLEY_USER" // set on each joined channel, read back on resync
-	actionTimeout = 10 * time.Second
-)
+const actionTimeout = 10 * time.Second
 
 var (
 	ErrNotMember  = errors.New("conversation not found")
 	ErrCannotCall = errors.New("you can't call this user")
 )
 
-// ARI is the subset of the Asterisk REST Interface the manager uses.
-type ARI interface {
-	Answer(ctx context.Context, channel string) error
-	Hangup(ctx context.Context, channel string) error
-	SetVar(ctx context.Context, channel, name, value string) error
-	GetVar(ctx context.Context, channel, name string) (string, error)
-	CreateBridge(ctx context.Context, id, name string) error
-	AddChannel(ctx context.Context, bridge, channel string) error
-	DestroyBridge(ctx context.Context, bridge string) error
-	ListBridges(ctx context.Context) ([]ari.Bridge, error)
+// Member is one call leg in a room.
+type Member struct {
+	CallID string
+	User   uuid.UUID
+}
+
+// Media is the media server, as seen by the manager.
+type Media interface {
+	// Admit moves a waiting (parked) call into the room.
+	Admit(ctx context.Context, callID string, room uuid.UUID) error
+	// Reject hangs a call up.
+	Reject(ctx context.Context, callID string) error
+	// Rooms lists the rooms in progress and their members, for resync.
+	Rooms(ctx context.Context) (map[uuid.UUID][]Member, error)
+}
+
+// EventHandler receives call events from the media server.
+type EventHandler interface {
+	// CallArrived: a call is waiting to be admitted. room and user are as
+	// Kamailio authenticated them (still strings: unverified input).
+	CallArrived(callID, room, user string)
+	// CallEnded: a call hung up (admitted or not).
+	CallEnded(callID string)
 }
 
 // Directory answers who may call whom, from the conversations data.
@@ -67,13 +74,13 @@ type room struct {
 	conv      uuid.UUID
 	startedBy uuid.UUID
 	startedAt time.Time
-	channels  map[string]uuid.UUID // ARI channel id -> user
+	legs      map[string]uuid.UUID // call id -> user
 }
 
 func (r *room) call() Call {
 	seen := map[uuid.UUID]bool{}
 	var ps []uuid.UUID
-	for _, u := range r.channels {
+	for _, u := range r.legs {
 		if !seen[u] {
 			seen[u] = true
 			ps = append(ps, u)
@@ -84,17 +91,17 @@ func (r *room) call() Call {
 }
 
 type Manager struct {
-	ari ARI
-	dir Directory
-	pub events.Publisher
-	now func() time.Time
+	media Media
+	dir   Directory
+	pub   events.Publisher
+	now   func() time.Time
 
 	mu    sync.Mutex
 	rooms map[uuid.UUID]*room
 }
 
-func NewManager(a ARI, dir Directory, pub events.Publisher) *Manager {
-	return &Manager{ari: a, dir: dir, pub: pub, now: time.Now, rooms: map[uuid.UUID]*room{}}
+func NewManager(media Media, dir Directory, pub events.Publisher) *Manager {
+	return &Manager{media: media, dir: dir, pub: pub, now: time.Now, rooms: map[uuid.UUID]*room{}}
 }
 
 // Authorize checks that user may be in conv's call: they're a member and, in
@@ -165,34 +172,17 @@ func (m *Manager) Decline(ctx context.Context, user, conv uuid.UUID) error {
 	return nil
 }
 
-// HandleEvent processes one ARI event.
-func (m *Manager) HandleEvent(e ari.Event) {
-	if e.Channel == nil {
-		return
-	}
+// CallArrived admits a waiting call into its room after re-checking the
+// caller, or hangs it up.
+func (m *Manager) CallArrived(callID, roomArg, userArg string) {
 	ctx, cancel := context.WithTimeout(context.Background(), actionTimeout)
 	defer cancel()
-	switch e.Type {
-	case "StasisStart":
-		m.join(ctx, e.Channel.ID, e.Args)
-	case "StasisEnd":
-		m.leave(ctx, e.Channel.ID)
-	}
-}
-
-// join admits a channel that entered the Stasis app. Args are the room
-// (conversation id) and the user Kamailio authenticated.
-func (m *Manager) join(ctx context.Context, channel string, args []string) {
 	reject := func(reason string, err error) {
-		slog.Warn("rejecting call", "channel", channel, "reason", reason, "err", err)
-		m.ari.Hangup(ctx, channel)
+		slog.Warn("rejecting call", "call", callID, "reason", reason, "err", err)
+		m.media.Reject(ctx, callID)
 	}
-	if len(args) < 2 {
-		reject("missing room or user", nil)
-		return
-	}
-	conv, err1 := uuid.Parse(args[0])
-	user, err2 := uuid.Parse(args[1])
+	conv, err1 := uuid.Parse(roomArg)
+	user, err2 := uuid.Parse(userArg)
 	if err1 != nil || err2 != nil {
 		reject("bad room or user", errors.Join(err1, err2))
 		return
@@ -204,23 +194,8 @@ func (m *Manager) join(ctx context.Context, channel string, args []string) {
 		reject("not allowed", err)
 		return
 	}
-
-	bridge := bridgePrefix + conv.String()
-	if err := m.ari.Answer(ctx, channel); err != nil {
-		reject("answer failed", err)
-		return
-	}
-	if err := m.ari.SetVar(ctx, channel, userVariable, user.String()); err != nil {
-		reject("set user variable failed", err)
-		return
-	}
-	// The bridge already exists once the first person is in: that's fine.
-	if err := m.ari.CreateBridge(ctx, bridge, "call "+conv.String()); err != nil && !errors.Is(err, ari.ErrConflict) {
-		reject("create bridge failed", err)
-		return
-	}
-	if err := m.ari.AddChannel(ctx, bridge, channel); err != nil {
-		reject("add to bridge failed", err)
+	if err := m.media.Admit(ctx, callID, conv); err != nil {
+		reject("admit failed", err)
 		return
 	}
 
@@ -228,10 +203,10 @@ func (m *Manager) join(ctx context.Context, channel string, args []string) {
 	r := m.rooms[conv]
 	started := r == nil
 	if started {
-		r = &room{conv: conv, startedBy: user, startedAt: m.now(), channels: map[string]uuid.UUID{}}
+		r = &room{conv: conv, startedBy: user, startedAt: m.now(), legs: map[string]uuid.UUID{}}
 		m.rooms[conv] = r
 	}
-	r.channels[channel] = user
+	r.legs[callID] = user
 	call := r.call()
 	m.mu.Unlock()
 
@@ -242,22 +217,26 @@ func (m *Manager) join(ctx context.Context, channel string, args []string) {
 	m.pub.Publish(ctx, events.Event{Type: events.CallUpdated, Recipients: members, Data: call})
 }
 
-func (m *Manager) leave(ctx context.Context, channel string) {
+// CallEnded removes a hung-up call from its room; the room ends when empty.
+// (The media server tears the conference down by itself.)
+func (m *Manager) CallEnded(callID string) {
+	ctx, cancel := context.WithTimeout(context.Background(), actionTimeout)
+	defer cancel()
 	m.mu.Lock()
 	var r *room
 	for _, candidate := range m.rooms {
-		if _, ok := candidate.channels[channel]; ok {
+		if _, ok := candidate.legs[callID]; ok {
 			r = candidate
 			break
 		}
 	}
 	if r == nil {
 		m.mu.Unlock()
-		return // a rejected or never-admitted channel
+		return // a rejected or never-admitted call
 	}
-	user := r.channels[channel]
-	delete(r.channels, channel)
-	ended := len(r.channels) == 0
+	user := r.legs[callID]
+	delete(r.legs, callID)
+	ended := len(r.legs) == 0
 	if ended {
 		delete(m.rooms, r.conv)
 	}
@@ -267,9 +246,6 @@ func (m *Manager) leave(ctx context.Context, channel string) {
 	slog.Info("left call", "conversation", r.conv, "user", user, "participants", len(call.Participants))
 	recipients := m.recipients(ctx, r.conv, user)
 	if ended {
-		if err := m.ari.DestroyBridge(ctx, bridgePrefix+r.conv.String()); err != nil && !errors.Is(err, ari.ErrNotFound) {
-			slog.Warn("destroy bridge", "conversation", r.conv, "err", err)
-		}
 		m.pub.Publish(ctx, events.Event{Type: events.CallEnded, Recipients: recipients, Data: map[string]uuid.UUID{"conversation_id": r.conv}})
 		return
 	}
@@ -290,45 +266,32 @@ func (m *Manager) recipients(ctx context.Context, conv, user uuid.UUID) []uuid.U
 	return []uuid.UUID{user}
 }
 
-// Resync rebuilds room state from Asterisk after (re)connecting to ARI, so a
-// voice-control restart doesn't drop calls in progress. Empty leftover
-// bridges are destroyed.
+// Resync rebuilds room state from the media server after (re)connecting, so
+// a voice-control restart doesn't lose track of calls in progress.
 func (m *Manager) Resync(ctx context.Context) {
-	bridges, err := m.ari.ListBridges(ctx)
+	current, err := m.media.Rooms(ctx)
 	if err != nil {
-		slog.Error("resync: list bridges", "err", err)
+		slog.Error("resync: list rooms", "err", err)
 		return
 	}
 	rooms := map[uuid.UUID]*room{}
-	for _, b := range bridges {
-		conv, err := uuid.Parse(strings.TrimPrefix(b.ID, bridgePrefix))
-		if !strings.HasPrefix(b.ID, bridgePrefix) || err != nil {
+	for conv, members := range current {
+		if len(members) == 0 {
 			continue
 		}
-		r := &room{conv: conv, startedAt: m.now(), channels: map[string]uuid.UUID{}}
-		for _, ch := range b.Channels {
-			v, err := m.ari.GetVar(ctx, ch, userVariable)
-			if u, perr := uuid.Parse(v); err == nil && perr == nil {
-				r.channels[ch] = u
-				if r.startedBy == uuid.Nil {
-					r.startedBy = u
-				}
-			}
-		}
-		if len(r.channels) == 0 {
-			m.ari.DestroyBridge(ctx, b.ID)
-			continue
+		r := &room{conv: conv, startedBy: members[0].User, startedAt: m.now(), legs: map[string]uuid.UUID{}}
+		for _, mb := range members {
+			r.legs[mb.CallID] = mb.User
 		}
 		rooms[conv] = r
 	}
 	m.mu.Lock()
-	// Keep start times we already knew.
-	for conv, r := range rooms {
+	for conv, r := range rooms { // keep start info we already knew
 		if old := m.rooms[conv]; old != nil {
 			r.startedAt, r.startedBy = old.startedAt, old.startedBy
 		}
 	}
 	m.rooms = rooms
 	m.mu.Unlock()
-	slog.Info("resynced calls from asterisk", "rooms", len(rooms))
+	slog.Info("resynced calls from media server", "rooms", len(rooms))
 }

@@ -4,11 +4,12 @@
 # room (sip:<conversation id>@<host>) when joining a call, authenticated with
 # short-lived credentials minted by voice-control. Kamailio checks them, makes
 # sure they're for this room, tags the request with the verified user, and
-# relays it to Asterisk on loopback. Media goes client <-> Asterisk directly.
+# relays it to the media server (FreeSWITCH) on loopback. Media goes
+# client <-> FreeSWITCH directly.
 #
 # Environment:
 #   PARLEY_SIP_SECRET     shared with voice-control (HMAC key). Required.
-#   PARLEY_SIP_ASTERISK   where Asterisk listens, e.g. "sip:127.0.0.1:5080"
+#   PARLEY_SIP_MEDIA      where FreeSWITCH listens, e.g. "sip:127.0.0.1:5080"
 #   PARLEY_SIP_ADVERTISE  host[:port] clients reach this server on (LAN/public IP)
 
 # (rendered from this template by entrypoint.sh)
@@ -97,7 +98,7 @@ request_route {
 	append_hf("X-Parley-User: $var(user)\r\n");
 
 	record_route();
-	$du = "${PARLEY_SIP_ASTERISK}";
+	$du = "${PARLEY_SIP_MEDIA}";
 	route(RELAY);
 }
 
@@ -113,7 +114,7 @@ route[REQINIT] {
 }
 
 # Clients are assumed to be behind NAT: reply to the packet's real source and
-# rewrite their Contact so in-dialog requests (e.g. BYE from Asterisk) reach them.
+# rewrite their Contact so in-dialog requests (e.g. BYE from FreeSWITCH) reach them.
 route[NATDETECT] {
 	force_rport();
 	if (nat_uac_test("19")) {

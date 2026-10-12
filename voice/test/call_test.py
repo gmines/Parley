@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """End-to-end voice test: two pjsua clients join one call through
-Kamailio -> Asterisk (voice-control admits them over ARI), each plays a
+Kamailio -> FreeSWITCH (voice-control admits them over the Event Socket), each plays a
 different tone, and we check that each side heard the other's tone.
 
-Needs the stack running (api, voice-control, Kamailio, Asterisk) and the
+Needs the stack running (api, voice-control, Kamailio, FreeSWITCH) and the
 parley/pjsua:dev image (voice/test/pjsua.Containerfile). Creates two
 throwaway users and deletes them afterwards (via psql).
 
@@ -56,14 +56,27 @@ def tone_power(path, freq, skip_s=3.0, window_s=4.0):
     return (s1 * s1 + s2 * s2 - k * s1 * s2) / len(samples)
 
 
-def pjsua(name, workdir, creds, local_port, rtp_port, play, rec, target, seconds):
+def sdp_answer(log):
+    """The SDP body of the 200 OK to our INVITE, from a pjsua log."""
+    out, inside = [], False
+    for line in log.splitlines():
+        if "Response msg 200/INVITE" in line:
+            inside = True
+        elif inside and line.startswith("--end msg--"):
+            break
+        elif inside:
+            out.append(line)
+    return "\n".join(out)
+
+
+def pjsua(name, workdir, creds, local_port, rtp_port, play, rec, target, seconds, srtp=True):
     """Starts pjsua in a container joining `target`; returns the Popen."""
     args = [
         "--null-audio", "--no-udp", "--local-port", str(local_port), "--rtp-port", str(rtp_port),
         "--id", f"sip:{creds['username'].split(':')[1].split('.')[0]}@parley",
         "--outbound", creds["proxy"] + ";lr",
         "--realm", creds["realm"], "--username", creds["username"], "--password", creds["password"],
-        "--use-srtp", "2", "--srtp-secure", "0", "--add-codec", "opus",
+        "--use-srtp", "2" if srtp else "0", "--srtp-secure", "0", "--add-codec", "opus",
         "--max-calls", "1", "--log-level", "4", "--app-log-level", "4",
     ]
     if play:
@@ -81,7 +94,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--host", default="192.168.19.45")
     ap.add_argument("--db", default="postgres://postgres:parley@localhost:55432/parley?sslmode=disable")
-    ap.add_argument("--group", action="store_true", help="3-person group call instead of a DM (exercises mixing + Opus transcoding)")
+    ap.add_argument("--group", action="store_true", help="3-person group call instead of a DM (exercises the conference mixer)")
     opt = ap.parse_args()
     if opt.group:
         return group_call(opt)
@@ -138,16 +151,20 @@ def main():
         p1 = pjsua("wrongroom", workdir, ja["sip"], 5074, 40200, None, None, other_room, 4)
         bad = dict(jb["sip"], password="AAAAAAAAAAAAAAAAAAAAAAAAAAA=")
         p2 = pjsua("badpass", workdir, bad, 5076, 40300, None, None, target, 4)
-        for p in (pa, pb, p1, p2):
+        # A client offering unencrypted audio must be refused, not downgraded.
+        p3 = pjsua("plainrtp", workdir, ja["sip"], 5078, 40400, None, None, target, 4, srtp=False)
+        for p in (pa, pb, p1, p2, p3):
             p.wait(timeout=60)
 
-        logs = {n: open(os.path.join(workdir, n + ".log"), errors="replace").read() for n in ("alice", "bob", "wrongroom", "badpass")}
+        logs = {n: open(os.path.join(workdir, n + ".log"), errors="replace").read() for n in ("alice", "bob", "wrongroom", "badpass", "plainrtp")}
+        check("CONFIRMED" not in logs["plainrtp"], "a client offering unencrypted audio (plain RTP) is refused")
         check("403" in logs["wrongroom"] and "CONFIRMED" not in logs["wrongroom"], "credentials for one room can't open another (403)")
         check("CONFIRMED" not in logs["badpass"] and ("407" in logs["badpass"] or "401" in logs["badpass"]), "a forged password is rejected")
         check("CONFIRMED" in logs["alice"] and "CONFIRMED" in logs["bob"], "both calls were answered")
-        codec = "opus" if "opus" in logs["alice"].lower() else "?"
-        srtp = "SRTP" in logs["alice"] or "srtp" in logs["alice"]
-        check(srtp, f"media is SRTP-encrypted (codec: {codec})")
+        answer = sdp_answer(logs["alice"])
+        check("RTP/SAVP" in answer and "a=crypto:" in answer, "the server's SDP answer requires SRTP (RTP/SAVP + a=crypto)")
+        check("opus/48000" in answer and "useinbandfec=1" in answer, "the server answered Opus with in-band FEC")
+        check(f"c=IN IP4 {opt.host}" in answer, f"the server advertises {opt.host} for media")
 
         heard_by_b = (tone_power(os.path.join(workdir, "b-rec.wav"), 440), tone_power(os.path.join(workdir, "b-rec.wav"), 880))
         heard_by_a = (tone_power(os.path.join(workdir, "a-rec.wav"), 880), tone_power(os.path.join(workdir, "a-rec.wav"), 440))
@@ -175,8 +192,8 @@ def main():
 
 
 def group_call(opt):
-    """Three people in a group call: Asterisk must decode, mix and re-encode
-    (softmix), which for Opus needs codec_opus. Each must hear both others."""
+    """Three people in a group call: FreeSWITCH's conference must decode, mix
+    and re-encode everyone's Opus. Each must hear both others."""
     api, voice = f"http://{opt.host}:18080", f"http://{opt.host}:18082"
     ok = True
 
