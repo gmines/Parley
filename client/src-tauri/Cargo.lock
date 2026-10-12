@@ -2815,6 +2815,7 @@ dependencies = [
 name = "parley-client"
 version = "0.2.1"
 dependencies = [
+ "cc",
  "chrono",
  "futures-util",
  "keyring",

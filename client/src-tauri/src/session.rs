@@ -151,18 +151,34 @@ impl SessionManager {
         path: &str,
         body: Option<Value>,
     ) -> Result<T> {
-        decode(self.authed(method, path, body).await?).await
+        decode(self.authed(None, method, path, body).await?).await
     }
 
     /// Authenticated request whose response body is ignored (e.g. 204).
     pub async fn call_empty(&self, method: Method, path: &str, body: Option<Value>) -> Result<()> {
-        self.authed(method, path, body).await.map(drop)
+        self.authed(None, method, path, body).await.map(drop)
     }
 
-    async fn authed(&self, method: Method, path: &str, body: Option<Value>) -> Result<Response> {
+    /// Like [`call`], but against another service's base URL (e.g.
+    /// voice-control), with the same session.
+    pub async fn call_at<T: DeserializeOwned>(&self, base: &Url, method: Method, path: &str, body: Option<Value>) -> Result<T> {
+        decode(self.authed(Some(base), method, path, body).await?).await
+    }
+
+    /// Like [`call_empty`], against another service's base URL.
+    pub async fn call_empty_at(&self, base: &Url, method: Method, path: &str, body: Option<Value>) -> Result<()> {
+        self.authed(Some(base), method, path, body).await.map(drop)
+    }
+
+    /// The server the session belongs to.
+    pub async fn server(&self) -> Result<Url> {
+        Ok(self.access_token(None).await?.0)
+    }
+
+    async fn authed(&self, base: Option<&Url>, method: Method, path: &str, body: Option<Value>) -> Result<Response> {
         let (server, token) = self.access_token(None).await?;
         let resp = self
-            .send(&server, method.clone(), path, &token, body.as_ref())
+            .send(base.unwrap_or(&server), method.clone(), path, &token, body.as_ref())
             .await?;
         if resp.status() != StatusCode::UNAUTHORIZED {
             return check(resp).await;
@@ -170,7 +186,7 @@ impl SessionManager {
         // Token rejected (e.g. server key rotated): refresh once and retry.
         let (server, token) = self.access_token(Some(&token)).await?;
         check(
-            self.send(&server, method, path, &token, body.as_ref())
+            self.send(base.unwrap_or(&server), method, path, &token, body.as_ref())
                 .await?,
         )
         .await

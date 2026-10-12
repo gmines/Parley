@@ -28,6 +28,9 @@
         <param name="enable-timer" value="false"/>
         <!-- Hang up calls whose audio has stopped arriving (dead client, lost network). -->
         <param name="media_timeout" value="30000"/>
+        <!-- Send RTCP reports: clients get round-trip time and loss for their
+             quality indicator, and Opus adapts its bitrate to reported loss. -->
+        <param name="rtcp-audio-interval-msec" value="5000"/>
         <param name="user-agent-string" value="Parley"/>
         <param name="tls" value="false"/>
       </settings>

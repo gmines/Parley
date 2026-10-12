@@ -14,6 +14,7 @@ pub struct AppState {
     pub session: SessionManager,
     pub config: ConfigStore,
     pub realtime: Realtime,
+    pub voice: crate::voice::Voice,
 }
 
 /// Path segments come from the UI, so only accept UUID-shaped IDs.
@@ -79,6 +80,7 @@ pub async fn login(
 
 #[tauri::command]
 pub async fn logout(state: State<'_, AppState>) -> Result<()> {
+    crate::voice::voice_leave(state.clone());
     state.realtime.stop().await;
     state.session.logout().await;
     Ok(())

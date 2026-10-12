@@ -1,0 +1,341 @@
+/* See parley_voice.h. */
+#include "parley_voice.h"
+
+#include <pjsua-lib/pjsua.h>
+#include <pjmedia-codec/opus.h>
+#include <string.h>
+
+#define THIS_FILE "parley_voice"
+
+#if defined(_MSC_VER)
+#define PV_THREAD_LOCAL __declspec(thread)
+#else
+#define PV_THREAD_LOCAL __thread
+#endif
+
+static pv_event_cb g_cb;
+static void *g_ctx;
+static int g_started;
+static pjsua_acc_id g_acc = PJSUA_INVALID_ID;
+static pjsua_call_id g_call = PJSUA_INVALID_ID;
+static int g_muted, g_deaf;
+static pjsua_player_id g_player = PJSUA_INVALID_ID;
+static pjsua_recorder_id g_recorder = PJSUA_INVALID_ID;
+
+/* pjsua requires every calling thread to be registered with pjlib. */
+static void ensure_thread(void) {
+    static PV_THREAD_LOCAL pj_thread_desc desc;
+    static PV_THREAD_LOCAL pj_thread_t *thread;
+    if (!pj_thread_is_registered()) {
+        pj_bzero(desc, sizeof(desc));
+        pj_thread_register("parley", desc, &thread);
+    }
+}
+
+static void emit(int kind, int a, int b, const char *text) {
+    if (g_cb) g_cb(g_ctx, kind, a, b, text ? text : "");
+}
+
+static void on_log(int level, const char *data, int len) {
+    char buf[512];
+    int n = len < (int)sizeof(buf) - 1 ? len : (int)sizeof(buf) - 1;
+    memcpy(buf, data, n);
+    while (n > 0 && (buf[n - 1] == '\n' || buf[n - 1] == '\r')) n--;
+    buf[n] = 0;
+    emit(PV_EV_LOG, level, 0, buf);
+}
+
+/* Audio routing for the current call: mic -> call unless muted,
+ * call -> speaker unless deafened, plus the test player/recorder. */
+static void route_audio(void) {
+    if (g_call == PJSUA_INVALID_ID) return;
+    pjsua_call_info ci;
+    if (pjsua_call_get_info(g_call, &ci) != PJ_SUCCESS) return;
+    pjsua_conf_port_id slot = pjsua_call_get_conf_port(g_call);
+    if (slot == PJSUA_INVALID_ID) return;
+
+    pjsua_conf_disconnect(0, slot);
+    pjsua_conf_disconnect(slot, 0);
+    if (!g_muted) pjsua_conf_connect(0, slot);
+    if (!g_deaf) pjsua_conf_connect(slot, 0);
+    if (g_player != PJSUA_INVALID_ID) pjsua_conf_connect(pjsua_player_get_conf_port(g_player), slot);
+    if (g_recorder != PJSUA_INVALID_ID) pjsua_conf_connect(slot, pjsua_recorder_get_conf_port(g_recorder));
+}
+
+static void on_call_state(pjsua_call_id call_id, pjsip_event *e) {
+    PJ_UNUSED_ARG(e);
+    pjsua_call_info ci;
+    if (pjsua_call_get_info(call_id, &ci) != PJ_SUCCESS) return;
+    int state;
+    switch (ci.state) {
+    case PJSIP_INV_STATE_CALLING:      state = PV_CALL_CALLING; break;
+    case PJSIP_INV_STATE_EARLY:
+    case PJSIP_INV_STATE_CONNECTING:   state = PV_CALL_CONNECTING; break;
+    case PJSIP_INV_STATE_CONFIRMED:    state = PV_CALL_CONFIRMED; break;
+    case PJSIP_INV_STATE_DISCONNECTED: state = PV_CALL_DISCONNECTED; break;
+    default:                           state = PV_CALL_IDLE; break;
+    }
+    char reason[128];
+    pj_ansi_snprintf(reason, sizeof(reason), "%.*s", (int)ci.last_status_text.slen, ci.last_status_text.ptr);
+    if (state == PV_CALL_DISCONNECTED && call_id == g_call) {
+        g_call = PJSUA_INVALID_ID;
+        if (g_acc != PJSUA_INVALID_ID) {
+            pjsua_acc_del(g_acc);
+            g_acc = PJSUA_INVALID_ID;
+        }
+    }
+    emit(PV_EV_CALL_STATE, state, ci.last_status, reason);
+}
+
+static void on_call_media_state(pjsua_call_id call_id) {
+    pjsua_call_info ci;
+    if (pjsua_call_get_info(call_id, &ci) != PJ_SUCCESS) return;
+    int active = ci.media_status == PJSUA_CALL_MEDIA_ACTIVE;
+    if (active) route_audio();
+    emit(PV_EV_MEDIA, active, 0, NULL);
+}
+
+static void configure_codecs(void) {
+    pj_str_t id;
+    /* Opus first, G.722 as fallback, nothing else. */
+    pjsua_codec_info codecs[32];
+    unsigned count = PJ_ARRAY_SIZE(codecs);
+    if (pjsua_enum_codecs(codecs, &count) == PJ_SUCCESS) {
+        for (unsigned i = 0; i < count; i++) pjsua_codec_set_priority(&codecs[i].codec_id, 0);
+    }
+    pjsua_codec_set_priority(pj_cstr(&id, "opus/48000/2"), 255);
+    pjsua_codec_set_priority(pj_cstr(&id, "G722/16000/1"), 128);
+
+    /* Opus tuned like the server: in-band FEC both ways, sized for ~10% loss,
+     * VBR, no DTX. Setting plc advertises useinbandfec=1, so the server sends
+     * FEC; our encoder enables FEC because the server advertises it too. */
+    pjmedia_codec_param param;
+    if (pjsua_codec_get_param(pj_cstr(&id, "opus/48000/2"), &param) == PJ_SUCCESS) {
+        pjmedia_codec_opus_config cfg;
+        pjmedia_codec_opus_get_config(&cfg);
+        cfg.packet_loss = 10;
+        cfg.complexity = 10;
+        cfg.cbr = PJ_FALSE;
+        param.setting.plc = 1;
+        param.setting.vad = 0;
+        pjmedia_codec_opus_set_default_param(&cfg, &param);
+        pjsua_codec_set_param(pj_cstr(&id, "opus/48000/2"), &param);
+    }
+}
+
+int pv_init(const pv_options *opt, pv_event_cb cb, void *ctx) {
+    if (g_started) return 0;
+    g_cb = cb;
+    g_ctx = ctx;
+    if (pjsua_create() != PJ_SUCCESS) return -1;
+    ensure_thread();
+
+    pjsua_config cfg;
+    pjsua_config_default(&cfg);
+    cfg.cb.on_call_state = &on_call_state;
+    cfg.cb.on_call_media_state = &on_call_media_state;
+    cfg.max_calls = 4;
+    if (opt && opt->user_agent) cfg.user_agent = pj_str((char *)opt->user_agent);
+
+    pjsua_logging_config log_cfg;
+    pjsua_logging_config_default(&log_cfg);
+    log_cfg.level = opt ? opt->log_level : 3;
+    log_cfg.console_level = log_cfg.level;
+    log_cfg.cb = &on_log;
+
+    pjsua_media_config media;
+    pjsua_media_config_default(&media);
+    media.clock_rate = 48000;
+    media.snd_clock_rate = 48000;
+    media.channel_count = 1;
+    media.no_vad = PJ_TRUE;
+    /* Echo cancellation (WebRTC AEC, bundled) with noise suppression. */
+    media.ec_tail_len = 200;
+    media.ec_options = PJMEDIA_ECHO_WEBRTC | PJMEDIA_ECHO_USE_NOISE_SUPPRESSOR | PJMEDIA_ECHO_AGGRESSIVENESS_DEFAULT;
+    /* Adaptive jitter buffer: start small, grow with network jitter. */
+    media.jb_init = -1;
+    media.jb_min_pre = -1;
+    media.jb_max_pre = -1;
+    media.jb_max = -1;
+    media.enable_ice = PJ_FALSE; /* phase 4 */
+
+    if (pjsua_init(&cfg, &log_cfg, &media) != PJ_SUCCESS) {
+        pjsua_destroy();
+        return -2;
+    }
+    /* Outbound only: an ephemeral TCP port for signaling to Kamailio. */
+    pjsua_transport_config tcfg;
+    pjsua_transport_config_default(&tcfg);
+    tcfg.port = 0;
+    if (pjsua_transport_create(PJSIP_TRANSPORT_TCP, &tcfg, NULL) != PJ_SUCCESS) {
+        pjsua_destroy();
+        return -3;
+    }
+    if (opt && opt->null_audio) pjsua_set_null_snd_dev();
+    if (pjsua_start() != PJ_SUCCESS) {
+        pjsua_destroy();
+        return -4;
+    }
+    configure_codecs();
+    g_started = 1;
+    return 0;
+}
+
+void pv_shutdown(void) {
+    if (!g_started) return;
+    ensure_thread();
+    pjsua_call_hangup_all();
+    pjsua_destroy();
+    g_started = 0;
+    g_call = PJSUA_INVALID_ID;
+    g_acc = PJSUA_INVALID_ID;
+}
+
+int pv_join(const pv_join_params *p) {
+    if (!g_started) return -1;
+    ensure_thread();
+    if (g_call != PJSUA_INVALID_ID) return -2; /* already in a call */
+    if (g_acc != PJSUA_INVALID_ID) {
+        pjsua_acc_del(g_acc);
+        g_acc = PJSUA_INVALID_ID;
+    }
+
+    char id[256], proxy[256];
+    pj_ansi_snprintf(id, sizeof(id), "sip:%s@%s", p->identity, p->realm);
+    pj_ansi_snprintf(proxy, sizeof(proxy), "%s;lr", p->proxy);
+
+    pjsua_acc_config acc;
+    pjsua_acc_config_default(&acc);
+    acc.id = pj_str(id);
+    acc.register_on_acc_add = PJ_FALSE; /* never register: outbound calls only */
+    acc.proxy_cnt = 1;
+    acc.proxy[0] = pj_str(proxy);
+    acc.cred_count = 1;
+    acc.cred_info[0].realm = pj_str((char *)p->realm);
+    acc.cred_info[0].scheme = pj_str("digest");
+    acc.cred_info[0].username = pj_str((char *)p->username);
+    acc.cred_info[0].data_type = PJSIP_CRED_DATA_PLAIN_PASSWD;
+    acc.cred_info[0].data = pj_str((char *)p->password);
+    acc.use_srtp = PJMEDIA_SRTP_MANDATORY;
+    acc.srtp_secure_signaling = 0; /* signaling is TCP until TLS (phase 4) */
+    acc.allow_contact_rewrite = PJ_TRUE;
+    /* RTCP on the same port as RTP (RFC 5761): one NAT mapping instead of
+     * two, and the server can't mis-latch a separate RTCP port. */
+    acc.enable_rtcp_mux = PJ_TRUE;
+
+    if (pjsua_acc_add(&acc, PJ_FALSE, &g_acc) != PJ_SUCCESS) return -3;
+
+    pjsua_call_setting opt;
+    pjsua_call_setting_default(&opt);
+    opt.aud_cnt = 1;
+    opt.vid_cnt = 0;
+    pj_str_t uri = pj_str((char *)p->room_uri);
+    if (pjsua_call_make_call(g_acc, &uri, &opt, NULL, NULL, &g_call) != PJ_SUCCESS) {
+        pjsua_acc_del(g_acc);
+        g_acc = PJSUA_INVALID_ID;
+        g_call = PJSUA_INVALID_ID;
+        return -4;
+    }
+    return 0;
+}
+
+void pv_leave(void) {
+    if (!g_started) return;
+    ensure_thread();
+    if (g_call != PJSUA_INVALID_ID) pjsua_call_hangup(g_call, 0, NULL, NULL);
+}
+
+void pv_set_mute(int muted) {
+    if (!g_started) return;
+    ensure_thread();
+    g_muted = muted;
+    route_audio();
+}
+
+void pv_set_deaf(int deaf) {
+    if (!g_started) return;
+    ensure_thread();
+    g_deaf = deaf;
+    route_audio();
+}
+
+int pv_get_stats(pv_stats *out) {
+    if (!g_started || g_call == PJSUA_INVALID_ID) return -1;
+    ensure_thread();
+    pj_bzero(out, sizeof(*out));
+    pjsua_call_info ci;
+    if (pjsua_call_get_info(g_call, &ci) != PJ_SUCCESS) return -2;
+    out->duration_s = (unsigned)ci.connect_duration.sec;
+
+    pjsua_stream_info si;
+    if (pjsua_call_get_stream_info(g_call, 0, &si) == PJ_SUCCESS && si.type == PJMEDIA_TYPE_AUDIO) {
+        pj_ansi_snprintf(out->codec, sizeof(out->codec), "%.*s",
+                         (int)si.info.aud.fmt.encoding_name.slen, si.info.aud.fmt.encoding_name.ptr);
+        out->clock_rate = si.info.aud.fmt.clock_rate;
+    }
+    pjsua_stream_stat st;
+    if (pjsua_call_get_stream_stat(g_call, 0, &st) == PJ_SUCCESS) {
+        /* pjmedia reports microseconds; round up so a measured sub-millisecond
+         * value (LAN) shows as 1 ms rather than "unknown" (0). */
+        out->rtt_ms = st.rtcp.rtt.last ? (st.rtcp.rtt.last + 999) / 1000 : 0;
+        out->rx_jitter_ms = (st.rtcp.rx.jitter.mean + 999) / 1000;
+        out->rx_packets = st.rtcp.rx.pkt;
+        out->rx_lost = st.rtcp.rx.loss;
+        out->tx_packets = st.rtcp.tx.pkt;
+        out->tx_lost = st.rtcp.tx.loss;
+    }
+    pjmedia_transport_info ti;
+    pjmedia_transport_info_init(&ti);
+    if (pjsua_call_get_med_transport_info(g_call, 0, &ti) == PJ_SUCCESS) {
+        for (unsigned i = 0; i < ti.specific_info_cnt; i++) {
+            if (ti.spc_info[i].type == PJMEDIA_TRANSPORT_TYPE_SRTP) {
+                pjmedia_srtp_info *srtp = (pjmedia_srtp_info *)ti.spc_info[i].buffer;
+                out->srtp = srtp->active ? 1 : 0;
+            }
+        }
+    }
+    return 0;
+}
+
+int pv_device_count(void) {
+    if (!g_started) return 0;
+    ensure_thread();
+    return (int)pjmedia_aud_dev_count();
+}
+
+int pv_device_info(int index, pv_device *out) {
+    if (!g_started) return -1;
+    ensure_thread();
+    pjmedia_aud_dev_info info;
+    if (pjmedia_aud_dev_get_info(index, &info) != PJ_SUCCESS) return -2;
+    pj_ansi_snprintf(out->name, sizeof(out->name), "%s", info.name);
+    out->inputs = (int)info.input_count;
+    out->outputs = (int)info.output_count;
+    return 0;
+}
+
+int pv_set_devices(int capture, int playback) {
+    if (!g_started) return -1;
+    ensure_thread();
+    if (capture < 0) capture = PJMEDIA_AUD_DEFAULT_CAPTURE_DEV;
+    if (playback < 0) playback = PJMEDIA_AUD_DEFAULT_PLAYBACK_DEV;
+    return pjsua_set_snd_dev(capture, playback) == PJ_SUCCESS ? 0 : -2;
+}
+
+int pv_test_play(const char *wav_path) {
+    if (!g_started) return -1;
+    ensure_thread();
+    pj_str_t path = pj_str((char *)wav_path);
+    if (pjsua_player_create(&path, 0, &g_player) != PJ_SUCCESS) return -2;
+    route_audio();
+    return 0;
+}
+
+int pv_test_record(const char *wav_path) {
+    if (!g_started) return -1;
+    ensure_thread();
+    pj_str_t path = pj_str((char *)wav_path);
+    if (pjsua_recorder_create(&path, 0, NULL, 0, 0, &g_recorder) != PJ_SUCCESS) return -2;
+    route_audio();
+    return 0;
+}

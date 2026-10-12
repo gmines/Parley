@@ -5,6 +5,8 @@ mod error;
 mod realtime;
 mod secrets;
 mod session;
+mod voice;
+pub mod voice_engine;
 
 use tauri::Manager;
 
@@ -16,6 +18,7 @@ pub fn run() {
                 session: session::SessionManager::new(Box::new(secrets::Keyring)),
                 config: config::ConfigStore::new(config_path),
                 realtime: realtime::Realtime::default(),
+                voice: voice::Voice::default(),
             });
             Ok(())
         })
@@ -44,6 +47,16 @@ pub fn run() {
             commands::block_user,
             commands::unblock_user,
             commands::realtime_start,
+            voice::voice_join,
+            voice::voice_leave,
+            voice::voice_set_mute,
+            voice::voice_set_deaf,
+            voice::voice_status,
+            voice::voice_stats,
+            voice::voice_devices,
+            voice::voice_set_devices,
+            voice::voice_decline,
+            voice::voice_calls,
             commands::app_info,
             commands::server_meta,
             commands::list_conversations,
@@ -54,6 +67,11 @@ pub fn run() {
             commands::send_message,
             commands::mark_read,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running Parley");
+        .build(tauri::generate_context!())
+        .expect("error while building Parley")
+        .run(|_app, event| {
+            if let tauri::RunEvent::Exit = event {
+                voice::shutdown();
+            }
+        });
 }

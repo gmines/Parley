@@ -1,6 +1,7 @@
-import { api, errorMessage, onRealtimeEvent, onRealtimeStatus, type Conversation, type Features, type RealtimeEvent, type User, type UserRef } from "./api";
+import { api, errorMessage, onRealtimeEvent, onRealtimeStatus, onVoiceEvent, type Conversation, type Features, type RealtimeEvent, type User, type UserRef } from "./api";
 import { avatar, h, mount, toast } from "./dom";
 import { conversationTitle, dmPeer, store } from "./store";
+import { callBar, disposeWidget, voice } from "./voice";
 import { aboutView, versionLabel } from "./views/about";
 import { accountView } from "./views/account";
 import { authView } from "./views/auth";
@@ -53,6 +54,7 @@ function showApp(initialUser: User) {
   leaveApp();
   let user = initialUser;
   store.setMe(user);
+  voice.setMe(user.id);
   let page: Page = { kind: "friends" };
   let friends: FriendsView | null = null;
   let conversation: ConversationView | null = null;
@@ -100,6 +102,7 @@ function showApp(initialUser: User) {
     },
   });
 
+  const bar = callBar((id) => go({ kind: "conversation", id }));
   const sidebar = h(
     "aside",
     { class: "sidebar" },
@@ -107,6 +110,7 @@ function showApp(initialUser: User) {
     h("nav", { class: "side-nav" }, friendsNav, accountNav, aboutNav),
     h("div", { class: "side-section" }, h("span", { text: "Direct messages" }), newGroup),
     dmList,
+    bar,
     h("div", { class: "me" }, meAvatar, h("div", { class: "me-text" }, meName, meSub), logout),
     version,
   );
@@ -138,12 +142,14 @@ function showApp(initialUser: User) {
           },
           peer ? avatar(peer, "sm") : h("div", { class: "avatar avatar-sm avatar-group", text: "#", attrs: { "aria-hidden": "true" } }),
           h("span", { class: "row-text" }, h("span", { class: "row-name", text: conversationTitle(c) }), h("span", { class: "row-sub", text: preview })),
+          voice.call(c.id) ? h("span", { class: "dm-call", text: "🔊", attrs: { title: `Call in progress (${voice.call(c.id)!.participants.length})` } }) : null,
           c.unread_count ? h("span", { class: "badge", text: c.unread_count >= 100 ? "99+" : String(c.unread_count) }) : null,
         );
       }),
     );
   }
   const unsubscribeStore = store.subscribe(renderDmList);
+  const unsubscribeVoice = voice.subscribe(renderDmList);
 
   // Pages --------------------------------------------------------------------------
   function go(next: Page) {
@@ -207,6 +213,7 @@ function showApp(initialUser: User) {
       case "ready":
         // (Re)connected: anything could have happened while we were away.
         store.load().catch(() => {});
+        voice.resync();
         conversation?.resync();
         friends?.reload();
         refreshPending();
@@ -222,6 +229,12 @@ function showApp(initialUser: User) {
         break;
       case "conversation.read":
         store.markRead(e.data.conversation_id, e.data.last_read_message_id);
+        break;
+      case "call.started":
+      case "call.updated":
+      case "call.ended":
+      case "call.declined":
+        voice.handleRealtime(e);
         break;
       case "friend_request.created":
       case "friend_request.removed":
@@ -246,7 +259,7 @@ function showApp(initialUser: User) {
     if (state === "signed_out") signedOut("Your session has expired; please log in again.");
   }
 
-  const unlisteners = [onRealtimeEvent(onEvent), onRealtimeStatus(onStatus)];
+  const unlisteners = [onRealtimeEvent(onEvent), onRealtimeStatus(onStatus), onVoiceEvent((e) => voice.handleVoiceEvent(e))];
   api.realtimeStart().catch((e) => toast(errorMessage(e), "error"));
   store.load().catch((e) => toast(errorMessage(e), "error"));
 
@@ -254,6 +267,9 @@ function showApp(initialUser: User) {
     friends?.dispose();
     conversation?.dispose();
     unsubscribeStore();
+    unsubscribeVoice();
+    disposeWidget(bar);
+    voice.reset();
     for (const u of unlisteners) u.then((fn) => fn());
   };
 

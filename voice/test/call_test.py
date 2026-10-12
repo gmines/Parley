@@ -95,6 +95,7 @@ def main():
     ap.add_argument("--host", default="192.168.19.45")
     ap.add_argument("--db", default="postgres://postgres:parley@localhost:55432/parley?sslmode=disable")
     ap.add_argument("--group", action="store_true", help="3-person group call instead of a DM (exercises the conference mixer)")
+    ap.add_argument("--app", metavar="VOICEPROBE", help="use the desktop app's voice engine (path to the voiceprobe binary) for alice instead of pjsua")
     opt = ap.parse_args()
     if opt.group:
         return group_call(opt)
@@ -136,7 +137,13 @@ def main():
                            check=True)
 
         target = f"sip:{conv_id}@{opt.host}"
-        pa = pjsua("alice", workdir, ja["sip"], 5070, 40000, "a.wav", "a-rec.wav", target, 14)
+        if opt.app:
+            # Alice is the desktop app's engine (shim + pjsua), not the pjsua CLI.
+            pa = subprocess.Popen([opt.app, "--creds", json.dumps(ja["sip"]), "--identity", a["user"]["id"],
+                                   "--play", os.path.join(workdir, "a.wav"), "--record", os.path.join(workdir, "a-rec.wav"),
+                                   "--seconds", "13"], stdout=open(os.path.join(workdir, "alice.log"), "w"), stderr=subprocess.STDOUT)
+        else:
+            pa = pjsua("alice", workdir, ja["sip"], 5070, 40000, "a.wav", "a-rec.wav", target, 14)
         time.sleep(3)
         pb = pjsua("bob", workdir, jb["sip"], 5072, 40100, "b.wav", "b-rec.wav", target, 10)
         time.sleep(5)
@@ -160,8 +167,14 @@ def main():
         check("CONFIRMED" not in logs["plainrtp"], "a client offering unencrypted audio (plain RTP) is refused")
         check("403" in logs["wrongroom"] and "CONFIRMED" not in logs["wrongroom"], "credentials for one room can't open another (403)")
         check("CONFIRMED" not in logs["badpass"] and ("407" in logs["badpass"] or "401" in logs["badpass"]), "a forged password is rejected")
-        check("CONFIRMED" in logs["alice"] and "CONFIRMED" in logs["bob"], "both calls were answered")
-        answer = sdp_answer(logs["alice"])
+        alice_ok = ("call Connected" in logs["alice"]) if opt.app else ("CONFIRMED" in logs["alice"])
+        check(alice_ok and "CONFIRMED" in logs["bob"], "both calls were answered" + (" (alice = desktop app engine)" if opt.app else ""))
+        if opt.app:
+            stats_line = next((l for l in logs["alice"].splitlines() if l.startswith("stats {")), "")
+            st_ = json.loads(stats_line[6:]) if stats_line else {}
+            print(f"     app engine stats: {st_}")
+            check(st_.get("encrypted") is True and st_.get("codec", "").lower() == "opus", "the app's call is SRTP-encrypted Opus (from its own stats)")
+        answer = sdp_answer(logs["bob"])
         check("RTP/SAVP" in answer and "a=crypto:" in answer, "the server's SDP answer requires SRTP (RTP/SAVP + a=crypto)")
         check("opus/48000" in answer and "useinbandfec=1" in answer, "the server answered Opus with in-band FEC")
         check(f"c=IN IP4 {opt.host}" in answer, f"the server advertises {opt.host} for media")

@@ -1,6 +1,7 @@
 import { api, errorCode, errorMessage, type Conversation, type Message } from "../api";
 import { avatar, h } from "../dom";
 import { conversationTitle, dmPeer, store } from "../store";
+import { callControl, disposeWidget } from "../voice";
 
 const MAX_CHARS = 4000;
 const GROUP_GAP_MS = 5 * 60 * 1000; // consecutive messages within this merge under one header
@@ -27,6 +28,7 @@ export function conversationView(conv: Conversation, onSignedOut: (msg: string) 
   let lastMarked = "";
 
   const title = h("h1", { text: conversationTitle(conv) });
+  const call = callControl(conv.id);
   const subtitle = h("span", { class: "conv-sub" });
   const list = h("div", { class: "messages", attrs: { role: "log", "aria-live": "polite" } });
   const banner = h("p", { class: "composer-error", attrs: { role: "alert" } });
@@ -35,7 +37,7 @@ export function conversationView(conv: Conversation, onSignedOut: (msg: string) 
   const el = h(
     "div",
     { class: "main conversation" },
-    h("header", { class: "main-header" }, title, subtitle),
+    h("header", { class: "main-header" }, title, subtitle, h("div", { class: "spacer" }), call),
     list,
     h("form", { class: "composer" }, banner, h("div", { class: "composer-row" }, input, counter)),
   );
@@ -268,6 +270,7 @@ export function conversationView(conv: Conversation, onSignedOut: (msg: string) 
     },
     resync,
     dispose() {
+      disposeWidget(call);
       window.removeEventListener("focus", onFocus);
       window.clearTimeout(markTimer);
     },

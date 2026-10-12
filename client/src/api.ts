@@ -92,6 +92,50 @@ export function onRealtimeStatus(fn: (s: RealtimeState) => void): Promise<Unlist
   return listen<{ state: RealtimeState }>("realtime-status", (e) => fn(e.payload.state));
 }
 
+/** A call in progress (voice-control). */
+export interface Call {
+  conversation_id: string;
+  started_by: string;
+  started_at: string;
+  participants: string[]; // user ids
+}
+
+export interface VoiceStats {
+  codec: string;
+  clock_rate: number;
+  rtt_ms: number;
+  jitter_ms: number;
+  rx_packets: number;
+  rx_lost: number;
+  tx_packets: number;
+  tx_lost: number;
+  duration_s: number;
+  encrypted: boolean;
+}
+
+export interface VoiceStatus {
+  conversation: string | null;
+  muted: boolean;
+  deafened: boolean;
+}
+
+export interface AudioDevice {
+  index: number;
+  name: string;
+  inputs: number;
+  outputs: number;
+}
+
+export type VoiceCallState = "idle" | "calling" | "connecting" | "connected" | "ended";
+
+export type VoiceEvent =
+  | { type: "state"; state: VoiceCallState; status: number; reason: string }
+  | { type: "media"; active: boolean };
+
+export function onVoiceEvent(fn: (e: VoiceEvent) => void): Promise<UnlistenFn> {
+  return listen<VoiceEvent>("voice-event", (e) => fn(e.payload));
+}
+
 /** This client build (see the About page). */
 export interface AppInfo {
   version: string;
@@ -160,6 +204,18 @@ export const api = {
   sendMessage: (conversationId: string, content: string, nonce: string) =>
     invoke<Message>("send_message", { conversationId, content, nonce }),
   markRead: (conversationId: string, messageId: string) => invoke<void>("mark_read", { conversationId, messageId }),
+
+  voiceJoin: (conversationId: string) => invoke<Call | null>("voice_join", { conversationId }),
+  voiceLeave: () => invoke<void>("voice_leave"),
+  voiceSetMute: (muted: boolean) => invoke<VoiceStatus>("voice_set_mute", { muted }),
+  voiceSetDeaf: (deafened: boolean) => invoke<VoiceStatus>("voice_set_deaf", { deafened }),
+  voiceStatus: () => invoke<VoiceStatus>("voice_status"),
+  voiceStats: () => invoke<VoiceStats | null>("voice_stats"),
+  voiceDevices: () => invoke<{ devices: AudioDevice[] }>("voice_devices"),
+  voiceSetDevices: (capture: number | null, playback: number | null) =>
+    invoke<void>("voice_set_devices", { capture, playback }),
+  voiceDecline: (conversationId: string) => invoke<void>("voice_decline", { conversationId }),
+  voiceCalls: () => invoke<Call[]>("voice_calls"),
 
   listFriends: () => invoke<Friend[]>("list_friends"),
   removeFriend: (userId: string) => invoke<void>("remove_friend", { userId }),
