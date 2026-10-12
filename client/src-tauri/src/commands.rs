@@ -383,3 +383,34 @@ pub async fn mark_read(
         )
         .await
 }
+
+// About ------------------------------------------------------------------------
+
+/// Identifies this build, for the About page and bug reports.
+#[derive(serde::Serialize)]
+pub struct AppInfo {
+    version: &'static str,
+    commit: &'static str,
+    os: &'static str,
+    arch: &'static str,
+    tauri_version: &'static str,
+    webview_version: Option<String>,
+}
+
+#[tauri::command]
+pub fn app_info() -> AppInfo {
+    AppInfo {
+        version: env!("CARGO_PKG_VERSION"),
+        commit: env!("PARLEY_COMMIT"),
+        os: std::env::consts::OS,
+        arch: std::env::consts::ARCH,
+        tauri_version: tauri::VERSION,
+        webview_version: tauri::webview_version().ok(),
+    }
+}
+
+/// Server metadata (GET /v1/meta): its version, realtime URL, features.
+#[tauri::command]
+pub async fn server_meta(state: State<'_, AppState>, server: String) -> Result<Value> {
+    state.session.public_get(&normalize_server(&server)?, "v1/meta").await
+}

@@ -1,5 +1,6 @@
 import { api, errorMessage, type Features, type User } from "../api";
 import { h } from "../dom";
+import { versionLabel } from "./about";
 
 export interface AuthOptions {
   server: string | null;
@@ -109,6 +110,7 @@ export function authView(opts: AuthOptions): HTMLElement {
     error,
     submit,
     h("div", { class: "auth-links" }, switchLink, forgotLink),
+    versionFooter(),
   );
 
   form.addEventListener("submit", async (e) => {
@@ -148,4 +150,11 @@ export function input(name: string, label: string, placeholder: string, value: s
   el.required = true;
   const field = h("label", { class: "field", attrs: { for: `f-${name}` } }, h("span", { text: label }), el);
   return { field, input: el };
+}
+
+/** Small "Parley 0.2.0 (abc123)" line, so testers can tell builds apart before logging in. */
+function versionFooter(): HTMLElement {
+  const el = h("p", { class: "auth-version" });
+  api.appInfo().then((i) => (el.textContent = `Parley ${versionLabel(i)}`)).catch(() => {});
+  return el;
 }

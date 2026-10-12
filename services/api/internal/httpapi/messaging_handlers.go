@@ -6,6 +6,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"parley/pkg/buildinfo"
 	"parley/pkg/httpx"
 )
 
@@ -14,6 +15,7 @@ import (
 func (s *Server) meta(w http.ResponseWriter, r *http.Request) error {
 	f := s.Identity.Features()
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{
+		"server":         buildinfo.Get(),
 		"realtime_url":   s.RealtimeURL,
 		"email_recovery": f.EmailRecovery,
 		"sms_recovery":   f.SMSRecovery,

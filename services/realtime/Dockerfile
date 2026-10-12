@@ -5,7 +5,8 @@ COPY go.mod go.sum ./
 RUN go mod download
 COPY pkg ./pkg
 COPY services/realtime ./services/realtime
-RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/realtime ./services/realtime
+ARG VERSION=dev
+RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -X parley/pkg/buildinfo.Version=${VERSION}" -o /out/realtime ./services/realtime
 
 FROM gcr.io/distroless/static-debian12:nonroot
 COPY --from=build /out/realtime /realtime

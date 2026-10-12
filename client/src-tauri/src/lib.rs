@@ -44,6 +44,8 @@ pub fn run() {
             commands::block_user,
             commands::unblock_user,
             commands::realtime_start,
+            commands::app_info,
+            commands::server_meta,
             commands::list_conversations,
             commands::get_conversation,
             commands::open_dm,

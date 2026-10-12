@@ -34,6 +34,7 @@ import (
 	"github.com/nats-io/nats.go"
 
 	"parley/pkg/auth"
+	"parley/pkg/buildinfo"
 	"parley/pkg/db"
 	"parley/pkg/events"
 	"parley/pkg/httpx"
@@ -148,7 +149,8 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	slog.Info("api listening", "addr", ln.Addr().String())
+	b := buildinfo.Get()
+	slog.Info("api listening", "addr", ln.Addr().String(), "version", b.Version, "commit", b.Commit, "modified", b.Modified)
 	errc := make(chan error, 1)
 	go func() { errc <- httpSrv.Serve(ln) }()
 

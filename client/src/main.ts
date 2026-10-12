@@ -1,6 +1,7 @@
 import { api, errorMessage, onRealtimeEvent, onRealtimeStatus, type Conversation, type Features, type RealtimeEvent, type User, type UserRef } from "./api";
 import { avatar, h, mount, toast } from "./dom";
 import { conversationTitle, dmPeer, store } from "./store";
+import { aboutView, versionLabel } from "./views/about";
 import { accountView } from "./views/account";
 import { authView } from "./views/auth";
 import { conversationView, type ConversationView } from "./views/conversation";
@@ -46,7 +47,7 @@ async function signedOut(message: string) {
   showAuth(await api.savedServer(), { notice: message });
 }
 
-type Page = { kind: "friends" } | { kind: "account" } | { kind: "conversation"; id: string };
+type Page = { kind: "friends" } | { kind: "account" } | { kind: "about" } | { kind: "conversation"; id: string };
 
 function showApp(initialUser: User) {
   leaveApp();
@@ -60,6 +61,10 @@ function showApp(initialUser: User) {
   const pendingBadge = h("span", { class: "badge", attrs: { hidden: "" } });
   const friendsNav = h("button", { class: "side-item", on: { click: () => go({ kind: "friends" }) } }, "Friends", pendingBadge);
   const accountNav = h("button", { class: "side-item", text: "Account", on: { click: () => go({ kind: "account" }) } });
+  const aboutNav = h("button", { class: "side-item", text: "About", on: { click: () => go({ kind: "about" }) } });
+  const version = h("button", { class: "side-version", attrs: { title: "About Parley" }, on: { click: () => go({ kind: "about" }) } });
+  api.appInfo().then((i) => (version.textContent = `Parley ${versionLabel(i)}`)).catch(() => {});
+  let realtimeState = "connecting";
   const dmList = h("nav", { class: "dm-list", attrs: { "aria-label": "Direct messages" } });
   const newGroup = h("button", {
     class: "icon-btn",
@@ -99,10 +104,11 @@ function showApp(initialUser: User) {
     "aside",
     { class: "sidebar" },
     h("div", { class: "brand", text: "Parley" }),
-    h("nav", { class: "side-nav" }, friendsNav, accountNav),
+    h("nav", { class: "side-nav" }, friendsNav, accountNav, aboutNav),
     h("div", { class: "side-section" }, h("span", { text: "Direct messages" }), newGroup),
     dmList,
     h("div", { class: "me" }, meAvatar, h("div", { class: "me-text" }, meName, meSub), logout),
+    version,
   );
   const pane = h("div", { class: "pane" });
   mount(root, h("div", { class: "shell" }, sidebar, pane));
@@ -144,6 +150,7 @@ function showApp(initialUser: User) {
     page = next;
     friendsNav.classList.toggle("side-item-active", page.kind === "friends");
     accountNav.classList.toggle("side-item-active", page.kind === "account");
+    aboutNav.classList.toggle("side-item-active", page.kind === "about");
     friends?.dispose();
     conversation?.dispose();
     friends = null;
@@ -163,6 +170,10 @@ function showApp(initialUser: User) {
             renderMe();
           }, signedOut),
         );
+      });
+    } else if (page.kind === "about") {
+      api.savedServer().then((server) => {
+        if (page.kind === "about") pane.replaceChildren(aboutView(server, user.username, () => statusTitle[realtimeState] ?? realtimeState));
       });
     } else {
       const c = store.get(page.id);
@@ -229,6 +240,7 @@ function showApp(initialUser: User) {
     signed_out: "Signed out",
   };
   function onStatus(state: string) {
+    realtimeState = state;
     connection.className = `conn-dot conn-${state}`;
     connection.title = statusTitle[state] ?? state;
     if (state === "signed_out") signedOut("Your session has expired; please log in again.");

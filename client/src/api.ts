@@ -92,6 +92,24 @@ export function onRealtimeStatus(fn: (s: RealtimeState) => void): Promise<Unlist
   return listen<{ state: RealtimeState }>("realtime-status", (e) => fn(e.payload.state));
 }
 
+/** This client build (see the About page). */
+export interface AppInfo {
+  version: string;
+  commit: string;
+  os: string;
+  arch: string;
+  tauri_version: string;
+  webview_version: string | null;
+}
+
+/** GET /v1/meta */
+export interface ServerMeta {
+  server?: { version: string; commit?: string; modified?: boolean; go_version: string };
+  realtime_url: string;
+  email_recovery: boolean;
+  sms_recovery: boolean;
+}
+
 export interface AppError {
   code: string;
   message: string;
@@ -131,6 +149,8 @@ export const api = {
   removeContact: (kind: ContactKind, password: string) => invoke<User>("remove_contact", { kind, password }),
 
   realtimeStart: () => invoke<void>("realtime_start"),
+  appInfo: () => invoke<AppInfo>("app_info"),
+  serverMeta: (server: string) => invoke<ServerMeta>("server_meta", { server }),
   listConversations: () => invoke<Conversation[]>("list_conversations"),
   getConversation: (conversationId: string) => invoke<Conversation>("get_conversation", { conversationId }),
   openDm: (userId: string) => invoke<Conversation>("open_dm", { userId }),

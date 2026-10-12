@@ -394,3 +394,24 @@ input:focus { outline: none; border-color: var(--accent); }
 .pick { display: flex; align-items: center; gap: 10px; padding: 8px 10px; cursor: pointer; }
 .pick:hover { background: var(--surface-2); }
 .pick input { width: auto; }
+
+/* About ------------------------------------------------------------------------- */
+.side-version {
+  border: 0;
+  background: none;
+  color: var(--text-2);
+  font-size: 11px;
+  text-align: left;
+  padding: 0 8px;
+  cursor: pointer;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.side-version:hover { color: var(--text); }
+.auth-version { text-align: center; font-size: 11px; color: var(--text-2); margin-top: 4px; }
+.about-hero { flex-direction: row; align-items: center; gap: 16px; }
+.about-logo { width: 64px; height: 64px; }
+.about-hero h2 { font-size: 20px; }
+.about-version { font-weight: 600; margin-top: 4px; }
+.selectable { user-select: text; overflow-wrap: anywhere; }
