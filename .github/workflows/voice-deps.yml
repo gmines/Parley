@@ -19,7 +19,7 @@ jobs:
       matrix:
         include:
           - platform: ubuntu-22.04
-          - platform: windows-latest
+          - platform: windows-2022 # pinned: VS 2022 (v143 toolset) for the pjproject build
           - platform: macos-latest
     runs-on: ${{ matrix.platform }}
     steps:

@@ -71,7 +71,7 @@ fi
 echo "==> opus $OPUS_VERSION"
 fetch "https://downloads.xiph.org/releases/opus/opus-$OPUS_VERSION.tar.gz" "$OPUS_SHA256" "$WORK/opus.tgz"
 mkdir "$WORK/opus" && tar xzf "$WORK/opus.tgz" -C "$WORK/opus" --strip-components=1
-(cd "$WORK/opus" && ./configure "${HOST_FLAG[@]}" --prefix="$PREFIX" --disable-shared --enable-static --with-pic \
+(cd "$WORK/opus" && ./configure ${HOST_FLAG[@]+"${HOST_FLAG[@]}"} --prefix="$PREFIX" --disable-shared --enable-static --with-pic \
    --disable-doc --disable-extra-programs >/dev/null && make -j"$JOBS" >/dev/null && make install >/dev/null)
 
 echo "==> pjproject $PJ_VERSION"
@@ -98,7 +98,7 @@ cat > "$WORK/pj/pjlib/include/pj/config_site.h" <<'CFG'
 #define PJSUA_MAX_CALLS              4
 #define PJSUA_MAX_ACC                4
 CFG
-(cd "$WORK/pj" && ./configure "${HOST_FLAG[@]}" --prefix="$PREFIX" --disable-shared --disable-ssl \
+(cd "$WORK/pj" && ./configure ${HOST_FLAG[@]+"${HOST_FLAG[@]}"} --prefix="$PREFIX" --disable-shared --disable-ssl \
    --disable-video --disable-sdl --disable-ffmpeg --disable-v4l2 --disable-openh264 \
    --disable-libyuv --disable-vpx --disable-bcg729 \
    --disable-speex-codec --disable-gsm-codec --disable-ilbc-codec --disable-g7221-codec \

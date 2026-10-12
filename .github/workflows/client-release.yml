@@ -1,4 +1,5 @@
-# Builds the Parley desktop installers on each OS's own runner:
+# Builds the Parley desktop installers on each OS's own runner (including the
+# native voice engine, client/scripts/build-voice-deps.*):
 #   Linux   .deb, .rpm, .AppImage
 #   Windows setup .exe (NSIS) and .msi
 #   macOS   universal .dmg / .app (Apple Silicon + Intel)
@@ -46,7 +47,14 @@ jobs:
       - name: Linux build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev libdbus-1-dev patchelf
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev libdbus-1-dev libasound2-dev patchelf
+      - name: Cache voice libraries
+        uses: actions/cache@v6
+        with:
+          path: client/.deps
+          key: voice-deps-${{ runner.os }}-${{ hashFiles('client/scripts/build-voice-deps.*') }}
+      - name: Build voice libraries
+        run: client/scripts/build-voice-deps.sh && rm -rf client/.deps/*/src
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
@@ -76,7 +84,7 @@ jobs:
         include:
           - platform: ubuntu-22.04 # oldest supported glibc, so packages run on newer distros
             args: ""
-          - platform: windows-latest
+          - platform: windows-2022 # pinned: VS 2022 (v143 toolset) for the pjproject build
             args: ""
           - platform: macos-latest
             args: "--target universal-apple-darwin"
@@ -88,7 +96,31 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev libdbus-1-dev patchelf
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev libdbus-1-dev libasound2-dev patchelf
+      - uses: microsoft/setup-msbuild@v3
+        if: runner.os == 'Windows'
+
+      # Native voice engine: Opus + pjproject (see client/scripts/build-voice-deps.*).
+      - name: Cache voice libraries
+        uses: actions/cache@v6
+        with:
+          path: client/.deps
+          key: voice-deps-${{ runner.os }}-${{ hashFiles('client/scripts/build-voice-deps.*') }}
+      - name: Build voice libraries (Linux)
+        if: runner.os == 'Linux'
+        run: client/scripts/build-voice-deps.sh && rm -rf client/.deps/*/src
+      - name: Build voice libraries (macOS, both architectures for the universal app)
+        if: runner.os == 'macOS'
+        run: |
+          VOICE_DEPS_ARCH=arm64 client/scripts/build-voice-deps.sh
+          VOICE_DEPS_ARCH=x86_64 client/scripts/build-voice-deps.sh
+          rm -rf client/.deps/*/src
+      - name: Build voice libraries (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          client/scripts/build-voice-deps.ps1
+          Remove-Item -Recurse -Force client/.deps/*/src
 
       - uses: dtolnay/rust-toolchain@stable
         with:
