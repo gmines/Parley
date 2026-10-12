@@ -3,6 +3,8 @@
 //! file into the call and records what it hears. voice/test/call_test.py
 //! uses it as one participant (`--app`).
 //!
+//! Build: cargo build --features voiceprobe --bin voiceprobe
+//!
 //!   voiceprobe --creds '<join response "sip" JSON>' --identity <user id> \
 //!              --play in.wav --record out.wav --seconds 10
 

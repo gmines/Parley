@@ -66,8 +66,8 @@ jobs:
           # tauri's build script wants the frontend dist directory to exist
           mkdir -p ../dist
           if [ "$RUNNER_OS" = macOS ]; then
-            cargo build --bin voiceprobe --target aarch64-apple-darwin
-            cargo build --bin voiceprobe --target x86_64-apple-darwin
+            cargo build --features voiceprobe --bin voiceprobe --target aarch64-apple-darwin
+            cargo build --features voiceprobe --bin voiceprobe --target x86_64-apple-darwin
           else
-            cargo build --bin voiceprobe
+            cargo build --features voiceprobe --bin voiceprobe
           fi

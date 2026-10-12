@@ -70,10 +70,14 @@ checks that credentials for another room, forged passwords and unencrypted
 ```sh
 python3 voice/test/call_test.py --host 192.168.19.45          # 1:1 DM call
 python3 voice/test/call_test.py --host 192.168.19.45 --group  # 3 people, mixed by the conference
+
+# The desktop app's own voice engine as one participant:
+(cd client/src-tauri && cargo build --features voiceprobe --bin voiceprobe)
+python3 voice/test/call_test.py --host 192.168.19.45 --app client/src-tauri/target/debug/voiceprobe
 ```
 
 ## Not done yet
 
 - SIP over TLS (`5061`/`443`): signaling is TCP for now, so SRTP keys travel in clear SDP.
 - TURN/ICE fallback for networks that block UDP, and call recovery across network changes (phase 4).
-- The desktop client side (phase 2: pjsip in the Tauri app).
+- The desktop client builds pjproject + Opus itself: see `client/scripts/build-voice-deps.*`.
