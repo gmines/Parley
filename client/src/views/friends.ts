@@ -3,18 +3,23 @@ import { avatar, confirmDialog, h, toast } from "../dom";
 
 type Tab = "all" | "pending" | "blocked" | "add";
 
-// Until the realtime service exists (milestone 2), lists refresh by polling.
-const POLL_MS = 15_000;
+// Realtime friend events trigger reload(); polling is only a safety net.
+const POLL_MS = 60_000;
 
 export interface FriendsView {
   el: HTMLElement;
   /** Called with the pending-incoming count whenever it changes (for the sidebar badge). */
   onPendingChange?: (n: number) => void;
+  /** Refetch everything (e.g. after a realtime friend event). */
+  reload(): void;
   dispose(): void;
 }
 
-/** onSignedOut is called if the session expires while the view is open. */
-export function friendsView(onSignedOut: (message: string) => void): FriendsView {
+/**
+ * onSignedOut is called if the session expires while the view is open;
+ * onMessage when the user clicks "Message" on a friend.
+ */
+export function friendsView(onSignedOut: (message: string) => void, onMessage: (u: UserRef) => void): FriendsView {
   let tab: Tab = "all";
   let friends: Friend[] = [];
   let requests: Requests = { incoming: [], outgoing: [] };
@@ -31,7 +36,7 @@ export function friendsView(onSignedOut: (message: string) => void): FriendsView
     content,
   );
 
-  const view: FriendsView = { el, dispose };
+  const view: FriendsView = { el, dispose, reload: () => void load() };
 
   async function load() {
     try {
@@ -121,6 +126,7 @@ export function friendsView(onSignedOut: (message: string) => void): FriendsView
           row(
             f.user,
             null,
+            actionBtn("Message", "btn-primary", () => onMessage(f.user)),
             actionBtn("Remove", "btn-ghost", async () => {
               const ok = await confirmDialog(
                 `Remove ${f.user.display_name}?`,

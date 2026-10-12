@@ -8,12 +8,13 @@ A minimal, self-hostable alternative to Discord with two features: **text chat**
 | Component | Tech | Status |
 |---|---|---|
 | `services/api`: accounts, sessions, friend graph, message history | Go, Postgres | **identity + social done** |
-| `services/realtime`: WebSocket fan-out, presence | Go, NATS JetStream | milestone 2 |
+| `services/api` messaging: DMs, group DMs, history, unread | Go, Postgres | **done** |
+| `services/realtime`: live events over WebSocket | Go, NATS | **done** (presence pending) |
 | `services/voice-control`: call/room lifecycle, SIP + TURN credentials | Go, Asterisk ARI | milestone 4 |
 | `voice/kamailio`: SIP edge, NAT fix-up, load balancing | Kamailio | milestone 4 |
 | `voice/asterisk`: audio media, ConfBridge group calls | Asterisk (PJSIP) | milestone 4 |
 | `voice/coturn`: TURN relay when UDP is blocked | coturn | milestone 5 |
-| `client`: desktop app for Windows, macOS and Linux | Tauri + pjsip (native SIP/RTP) | milestone 3 |
+| `client`: desktop app for Windows, macOS and Linux | Tauri (+ pjsip for voice) | **text chat done**; voice next |
 | `deploy`: Kubernetes | Helm, CloudNativePG | milestone 6 |
 
 Voice is native SIP/RTP, not WebRTC. Clients only make outbound connections.
@@ -31,8 +32,26 @@ make test        # starts a throwaway Postgres on :55432 and runs every test
 make test-unit   # no database; DB tests are skipped
 make run-api     # runs the api on :8080 with an ephemeral signing key
                  # (add PARLEY_RECOVERY_EMAIL=log PARLEY_RECOVERY_SMS=log to try password reset)
-make image-api   # builds the container image
+make dev-nats    # NATS on localhost:4222 for realtime events
+make image-api image-realtime   # container images
 ```
+
+### Running the full stack locally
+
+```sh
+make test-db dev-nats
+# api: logs its token public key as PARLEY_VERIFY_KEY at startup
+PARLEY_DATABASE_URL='postgres://postgres:parley@localhost:55432/parley?sslmode=disable' \
+PARLEY_SIGNING_KEY="$(openssl rand -base64 32)" \
+PARLEY_NATS_URL=nats://127.0.0.1:4222 \
+PARLEY_REALTIME_PUBLIC_URL=ws://<this host>:8081/v1/realtime \
+go run ./services/api
+# realtime, in another terminal
+PARLEY_NATS_URL=nats://127.0.0.1:4222 PARLEY_VERIFY_KEY=<from the api log> go run ./services/realtime
+```
+
+Behind a single ingress that routes `/v1/realtime` to the realtime service, leave
+`PARLEY_REALTIME_PUBLIC_URL` unset: clients then use `<server>/v1/realtime`.
 
 ### Desktop client (`client/`)
 
@@ -102,6 +121,7 @@ API reference: [`api/openapi.yaml`](api/openapi.yaml). Realtime events: [`api/ev
 
 ```
 pkg/            shared Go libraries (auth tokens, db + migrations, events, http helpers)
-services/api/   internal/{identity,social,httpapi}, migrations/
+services/api/       internal/{identity,social,messaging,delivery,httpapi}, migrations/
+services/realtime/  WebSocket gateway (NATS subject per user → connections)
 api/            OpenAPI spec and realtime event catalogue
 ```

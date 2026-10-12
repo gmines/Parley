@@ -2,6 +2,7 @@ mod api;
 mod commands;
 mod config;
 mod error;
+mod realtime;
 mod secrets;
 mod session;
 
@@ -14,6 +15,7 @@ pub fn run() {
             app.manage(commands::AppState {
                 session: session::SessionManager::new(Box::new(secrets::Keyring)),
                 config: config::ConfigStore::new(config_path),
+                realtime: realtime::Realtime::default(),
             });
             Ok(())
         })
@@ -41,6 +43,14 @@ pub fn run() {
             commands::list_blocked,
             commands::block_user,
             commands::unblock_user,
+            commands::realtime_start,
+            commands::list_conversations,
+            commands::get_conversation,
+            commands::open_dm,
+            commands::create_group,
+            commands::list_messages,
+            commands::send_message,
+            commands::mark_read,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Parley");

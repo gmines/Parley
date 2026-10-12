@@ -14,17 +14,22 @@ import (
 	"parley/pkg/auth"
 	"parley/pkg/httpx"
 	"parley/services/api/internal/identity"
+	"parley/services/api/internal/messaging"
 	"parley/services/api/internal/social"
 )
 
 type Server struct {
-	Identity *identity.Service
-	Social   *social.Service
-	Verifier *auth.Verifier
-	Pool     *pgxpool.Pool
+	Identity  *identity.Service
+	Social    *social.Service
+	Messaging *messaging.Service
+	Verifier  *auth.Verifier
+	Pool      *pgxpool.Pool
 	// TrustedProxies are the addresses (e.g. the ingress) whose
 	// X-Forwarded-For header is believed when determining the client IP.
 	TrustedProxies []netip.Prefix
+	// RealtimeURL is the WebSocket URL clients connect to for live events
+	// (served by the realtime service), advertised via GET /v1/meta.
+	RealtimeURL string
 }
 
 func (s *Server) Handler() http.Handler {
@@ -38,6 +43,7 @@ func (s *Server) Handler() http.Handler {
 	h("POST /v1/auth/login", s.login)
 	h("POST /v1/auth/refresh", s.refresh)
 	h("POST /v1/auth/logout", s.logout)
+	h("GET /v1/meta", s.meta)
 	h("GET /v1/auth/features", s.features)
 	h("POST /v1/auth/password-reset/request", s.requestPasswordReset)
 	h("POST /v1/auth/password-reset/confirm", s.confirmPasswordReset)
@@ -57,6 +63,13 @@ func (s *Server) Handler() http.Handler {
 	authed.Handle("GET /v1/blocks", httpx.Handler(s.listBlocked))
 	authed.Handle("PUT /v1/blocks/{userID}", httpx.Handler(s.block))
 	authed.Handle("DELETE /v1/blocks/{userID}", httpx.Handler(s.unblock))
+	authed.Handle("GET /v1/conversations", httpx.Handler(s.listConversations))
+	authed.Handle("POST /v1/conversations/dm", httpx.Handler(s.openDM))
+	authed.Handle("POST /v1/conversations/group", httpx.Handler(s.createGroup))
+	authed.Handle("GET /v1/conversations/{convID}", httpx.Handler(s.getConversation))
+	authed.Handle("GET /v1/conversations/{convID}/messages", httpx.Handler(s.listMessages))
+	authed.Handle("POST /v1/conversations/{convID}/messages", httpx.Handler(s.sendMessage))
+	authed.Handle("POST /v1/conversations/{convID}/read", httpx.Handler(s.markRead))
 
 	unauthorized := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, r, httpx.ErrUnauthorized)
@@ -67,6 +80,8 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("/v1/friends/", protected)
 	mux.Handle("/v1/blocks", protected)
 	mux.Handle("/v1/blocks/", protected)
+	mux.Handle("/v1/conversations", protected)
+	mux.Handle("/v1/conversations/", protected)
 	return mux
 }
 
@@ -136,6 +151,15 @@ func mapErr(err error) error {
 		social.ErrRequestNotFound:      {http.StatusNotFound, "request_not_found"},
 		social.ErrNotFriends:           {http.StatusNotFound, "not_friends"},
 		social.ErrUserNotFound:         {http.StatusNotFound, "user_not_found"},
+		messaging.ErrNotFound:          {http.StatusNotFound, "conversation_not_found"},
+		messaging.ErrNotFriends:        {http.StatusForbidden, "not_friends"},
+		messaging.ErrCannotMessage:     {http.StatusForbidden, "cannot_message"},
+		messaging.ErrSelf:              {http.StatusBadRequest, "self"},
+		messaging.ErrEmptyMessage:      {http.StatusBadRequest, "empty_message"},
+		messaging.ErrMessageTooLong:    {http.StatusBadRequest, "message_too_long"},
+		messaging.ErrGroupSize:         {http.StatusBadRequest, "group_size"},
+		messaging.ErrGroupName:         {http.StatusBadRequest, "group_name"},
+		messaging.ErrBadMessageID:      {http.StatusBadRequest, "bad_message_id"},
 	}
 	if locked := (*identity.LockedError)(nil); errors.As(err, &locked) {
 		e := httpx.NewError(http.StatusTooManyRequests, "too_many_attempts", locked.Error())

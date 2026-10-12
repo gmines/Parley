@@ -229,6 +229,119 @@ paths:
         '400': { $ref: '#/components/responses/Error' }
         '409': { $ref: '#/components/responses/Error' }
 
+  /v1/meta:
+    get:
+      security: []
+      summary: Server metadata for clients
+      responses:
+        '200':
+          description: Realtime URL and enabled features
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  realtime_url: { type: string, description: 'WebSocket URL of the realtime service; empty means "<server>/v1/realtime"' }
+                  email_recovery: { type: boolean }
+                  sms_recovery: { type: boolean }
+
+  /v1/conversations:
+    get:
+      summary: Your conversations, most recently active first
+      responses:
+        '200':
+          description: Conversations
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  conversations: { type: array, items: { $ref: '#/components/schemas/Conversation' } }
+  /v1/conversations/dm:
+    post:
+      summary: Open (or create) the DM with a friend
+      description: Creating a DM requires being friends (403 not_friends). An existing DM can always be opened.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, required: [user_id], properties: { user_id: { type: string, format: uuid } } }
+      responses:
+        '200': { description: The DM, content: { application/json: { schema: { $ref: '#/components/schemas/Conversation' } } } }
+        '403': { $ref: '#/components/responses/Error' }
+  /v1/conversations/group:
+    post:
+      summary: Start a group DM with 2-9 friends
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [user_ids]
+              properties:
+                user_ids: { type: array, items: { type: string, format: uuid } }
+                name: { type: string, maxLength: 64 }
+      responses:
+        '201': { description: The group, content: { application/json: { schema: { $ref: '#/components/schemas/Conversation' } } } }
+        '400': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+  /v1/conversations/{convID}:
+    get:
+      parameters: [{ $ref: '#/components/parameters/ConvID' }]
+      responses:
+        '200': { description: The conversation, content: { application/json: { schema: { $ref: '#/components/schemas/Conversation' } } } }
+        '404': { $ref: '#/components/responses/Error' }
+  /v1/conversations/{convID}/messages:
+    parameters: [{ $ref: '#/components/parameters/ConvID' }]
+    get:
+      summary: Message history, ascending
+      description: The newest `limit` messages, or those strictly `before` / `after` a message id (ids sort by time).
+      parameters:
+        - { name: before, in: query, schema: { type: string, format: uuid } }
+        - { name: after, in: query, schema: { type: string, format: uuid } }
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 100, default: 50 } }
+      responses:
+        '200':
+          description: Messages
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  messages: { type: array, items: { $ref: '#/components/schemas/Message' } }
+        '404': { $ref: '#/components/responses/Error' }
+    post:
+      summary: Send a message
+      description: In a DM, a block in either direction makes this fail with 403 cannot_message.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [content]
+              properties:
+                content: { type: string, maxLength: 4000, description: Plain text; surrounding whitespace is trimmed }
+                nonce: { type: string, maxLength: 64, description: Client id echoed in the message.created event }
+      responses:
+        '201': { description: Sent, content: { application/json: { schema: { $ref: '#/components/schemas/Message' } } } }
+        '400': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+  /v1/conversations/{convID}/read:
+    post:
+      summary: Move your read marker forward
+      parameters: [{ $ref: '#/components/parameters/ConvID' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, required: [message_id], properties: { message_id: { type: string, format: uuid } } }
+      responses:
+        '204': { description: Marked }
+        '400': { $ref: '#/components/responses/Error' }
+
   /v1/friends:
     get:
       responses:
@@ -338,6 +451,7 @@ components:
   parameters:
     UserID: { name: userID, in: path, required: true, schema: { type: string, format: uuid } }
     RequestID: { name: requestID, in: path, required: true, schema: { type: string, format: uuid } }
+    ConvID: { name: convID, in: path, required: true, schema: { type: string, format: uuid } }
   requestBodies:
     RefreshToken:
       required: true
@@ -393,6 +507,26 @@ components:
         from: { $ref: '#/components/schemas/UserRef' }
         to: { $ref: '#/components/schemas/UserRef' }
         created_at: { type: string, format: date-time }
+    Message:
+      type: object
+      properties:
+        id: { type: string, format: uuid, description: UUIDv7; sorts by time }
+        conversation_id: { type: string, format: uuid }
+        author: { oneOf: [{ $ref: '#/components/schemas/UserRef' }, { type: 'null' }] }
+        content: { type: string }
+        created_at: { type: string, format: date-time }
+        nonce: { type: string }
+    Conversation:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        kind: { type: string, enum: [dm, group] }
+        name: { type: string }
+        members: { type: array, items: { $ref: '#/components/schemas/UserRef' } }
+        created_at: { type: string, format: date-time }
+        last_message: { oneOf: [{ $ref: '#/components/schemas/Message' }, { type: 'null' }] }
+        last_read_message_id: { type: [string, 'null'], format: uuid }
+        unread_count: { type: integer, description: Capped at 100 }
     Blocked:
       type: object
       properties:
@@ -403,7 +537,8 @@ components:
       properties:
         code:
           type: string
-          examples: [invalid_username, weak_password, too_many_attempts, feature_disabled, invalid_email, invalid_phone,
+          examples: [conversation_not_found, cannot_message, empty_message, message_too_long, group_size, group_name, bad_message_id,
+                     invalid_username, weak_password, too_many_attempts, feature_disabled, invalid_email, invalid_phone,
                      invalid_code, contact_in_use, too_many_codes, invalid_channel, username_taken, bad_credentials, invalid_refresh_token,
                      cannot_send_request, already_friends, you_blocked_user, request_not_found,
                      not_friends, user_not_found, self, unauthorized, bad_request]

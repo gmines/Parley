@@ -18,7 +18,10 @@ pub struct ConfigStore {
 
 impl ConfigStore {
     pub fn new(path: PathBuf) -> Self {
-        Self { path, lock: Mutex::new(()) }
+        Self {
+            path,
+            lock: Mutex::new(()),
+        }
     }
 
     pub fn load(&self) -> Config {

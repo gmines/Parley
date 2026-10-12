@@ -1,6 +1,6 @@
 [package]
 name = "parley-client"
-version = "0.1.0"
+version = "0.2.0"
 description = "Parley desktop client: text and voice chat"
 authors = ["Parley contributors"]
 edition = "2021"
@@ -24,6 +24,8 @@ thiserror = "2"
 chrono = { version = "0.4", default-features = false, features = ["serde", "clock", "std"] }
 url = "2"
 log = "0.4"
+tokio-tungstenite = { version = "0.30", features = ["rustls-tls-native-roots"] }
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

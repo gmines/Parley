@@ -1,23 +1,26 @@
 //! Tauri commands invoked by the UI (see src/api.ts for the TypeScript side).
 
 use reqwest::Method;
-use serde_json::json;
-use tauri::State;
+use serde_json::{json, Value};
+use tauri::{AppHandle, State};
 
 use crate::api::{Blocked, BlockedList, Features, Friend, FriendsList, Requests, SendResult, User};
 use crate::config::ConfigStore;
 use crate::error::{AppError, Result};
+use crate::realtime::Realtime;
 use crate::session::{normalize_server, Registration, SessionManager};
 
 pub struct AppState {
     pub session: SessionManager,
     pub config: ConfigStore,
+    pub realtime: Realtime,
 }
 
 /// Path segments come from the UI, so only accept UUID-shaped IDs.
 fn id(s: &str) -> Result<&str> {
     let ok = s.len() == 36 && s.chars().all(|c| c.is_ascii_hexdigit() || c == '-');
-    ok.then_some(s).ok_or_else(|| AppError::Internal("invalid id".into()))
+    ok.then_some(s)
+        .ok_or_else(|| AppError::Internal("invalid id".into()))
 }
 
 #[tauri::command]
@@ -53,20 +56,30 @@ pub async fn register(
         phone: phone.as_deref().unwrap_or(""),
     };
     let user = state.session.register(&server, &reg).await?;
-    state.config.update(|c| c.server_url = Some(server.to_string()));
+    state
+        .config
+        .update(|c| c.server_url = Some(server.to_string()));
     Ok(user)
 }
 
 #[tauri::command]
-pub async fn login(state: State<'_, AppState>, server: String, username: String, password: String) -> Result<User> {
+pub async fn login(
+    state: State<'_, AppState>,
+    server: String,
+    username: String,
+    password: String,
+) -> Result<User> {
     let server = normalize_server(&server)?;
     let user = state.session.login(&server, &username, &password).await?;
-    state.config.update(|c| c.server_url = Some(server.to_string()));
+    state
+        .config
+        .update(|c| c.server_url = Some(server.to_string()));
     Ok(user)
 }
 
 #[tauri::command]
 pub async fn logout(state: State<'_, AppState>) -> Result<()> {
+    state.realtime.stop().await;
     state.session.logout().await;
     Ok(())
 }
@@ -78,20 +91,37 @@ pub async fn current_user(state: State<'_, AppState>) -> Result<Option<User>> {
 
 /// "email" or "phone" from the UI, as used in /v1/users/me/{contact}.
 fn contact(kind: &str) -> Result<&str> {
-    matches!(kind, "email" | "phone").then_some(kind).ok_or_else(|| AppError::Internal("invalid contact kind".into()))
+    matches!(kind, "email" | "phone")
+        .then_some(kind)
+        .ok_or_else(|| AppError::Internal("invalid contact kind".into()))
 }
 
 /// Which recovery options `server` offers. Works before logging in.
 #[tauri::command]
 pub async fn server_features(state: State<'_, AppState>, server: String) -> Result<Features> {
-    state.session.public_get(&normalize_server(&server)?, "v1/auth/features").await
+    state
+        .session
+        .public_get(&normalize_server(&server)?, "v1/auth/features")
+        .await
 }
 
 /// `channel` is "email" or "sms".
 #[tauri::command]
-pub async fn request_password_reset(state: State<'_, AppState>, server: String, username: String, channel: String) -> Result<()> {
+pub async fn request_password_reset(
+    state: State<'_, AppState>,
+    server: String,
+    username: String,
+    channel: String,
+) -> Result<()> {
     let body = json!({ "username": username, "channel": channel });
-    state.session.public_post(&normalize_server(&server)?, "v1/auth/password-reset/request", &body).await
+    state
+        .session
+        .public_post(
+            &normalize_server(&server)?,
+            "v1/auth/password-reset/request",
+            &body,
+        )
+        .await
 }
 
 #[tauri::command]
@@ -103,7 +133,14 @@ pub async fn confirm_password_reset(
     new_password: String,
 ) -> Result<()> {
     let body = json!({ "username": username, "code": code, "new_password": new_password });
-    state.session.public_post(&normalize_server(&server)?, "v1/auth/password-reset/confirm", &body).await
+    state
+        .session
+        .public_post(
+            &normalize_server(&server)?,
+            "v1/auth/password-reset/confirm",
+            &body,
+        )
+        .await
 }
 
 /// Fetches the signed-in user from the server (refreshes the cached copy).
@@ -115,30 +152,59 @@ pub async fn fetch_me(state: State<'_, AppState>) -> Result<User> {
 }
 
 #[tauri::command]
-pub async fn change_password(state: State<'_, AppState>, current_password: String, new_password: String) -> Result<User> {
-    state.session.change_password(&current_password, &new_password).await
+pub async fn change_password(
+    state: State<'_, AppState>,
+    current_password: String,
+    new_password: String,
+) -> Result<User> {
+    state
+        .session
+        .change_password(&current_password, &new_password)
+        .await
 }
 
 /// Sets an email/phone (unverified) and has the server send it a code.
 #[tauri::command]
-pub async fn set_contact(state: State<'_, AppState>, kind: String, value: String, password: String) -> Result<()> {
+pub async fn set_contact(
+    state: State<'_, AppState>,
+    kind: String,
+    value: String,
+    password: String,
+) -> Result<()> {
     let path = format!("v1/users/me/{}", contact(&kind)?);
     let body = json!({ "value": value, "password": password });
-    state.session.call_empty(Method::PUT, &path, Some(body)).await
+    state
+        .session
+        .call_empty(Method::PUT, &path, Some(body))
+        .await
 }
 
 #[tauri::command]
-pub async fn verify_contact(state: State<'_, AppState>, kind: String, code: String) -> Result<User> {
+pub async fn verify_contact(
+    state: State<'_, AppState>,
+    kind: String,
+    code: String,
+) -> Result<User> {
     let path = format!("v1/users/me/{}/verify", contact(&kind)?);
-    let user: User = state.session.call(Method::POST, &path, Some(json!({ "code": code }))).await?;
+    let user: User = state
+        .session
+        .call(Method::POST, &path, Some(json!({ "code": code })))
+        .await?;
     state.session.set_user(user.clone()).await;
     Ok(user)
 }
 
 #[tauri::command]
-pub async fn remove_contact(state: State<'_, AppState>, kind: String, password: String) -> Result<User> {
+pub async fn remove_contact(
+    state: State<'_, AppState>,
+    kind: String,
+    password: String,
+) -> Result<User> {
     let path = format!("v1/users/me/{}", contact(&kind)?);
-    let user: User = state.session.call(Method::DELETE, &path, Some(json!({ "password": password }))).await?;
+    let user: User = state
+        .session
+        .call(Method::DELETE, &path, Some(json!({ "password": password })))
+        .await?;
     state.session.set_user(user.clone()).await;
     Ok(user)
 }
@@ -157,17 +223,29 @@ pub async fn remove_friend(state: State<'_, AppState>, user_id: String) -> Resul
 
 #[tauri::command]
 pub async fn list_requests(state: State<'_, AppState>) -> Result<Requests> {
-    state.session.call(Method::GET, "v1/friends/requests", None).await
+    state
+        .session
+        .call(Method::GET, "v1/friends/requests", None)
+        .await
 }
 
 #[tauri::command]
-pub async fn send_friend_request(state: State<'_, AppState>, username: String) -> Result<SendResult> {
+pub async fn send_friend_request(
+    state: State<'_, AppState>,
+    username: String,
+) -> Result<SendResult> {
     let body = json!({ "username": username });
-    state.session.call(Method::POST, "v1/friends/requests", Some(body)).await
+    state
+        .session
+        .call(Method::POST, "v1/friends/requests", Some(body))
+        .await
 }
 
 #[tauri::command]
-pub async fn accept_friend_request(state: State<'_, AppState>, request_id: String) -> Result<Friend> {
+pub async fn accept_friend_request(
+    state: State<'_, AppState>,
+    request_id: String,
+) -> Result<Friend> {
     let path = format!("v1/friends/requests/{}/accept", id(&request_id)?);
     state.session.call(Method::POST, &path, None).await
 }
@@ -194,4 +272,114 @@ pub async fn block_user(state: State<'_, AppState>, user_id: String) -> Result<(
 pub async fn unblock_user(state: State<'_, AppState>, user_id: String) -> Result<()> {
     let path = format!("v1/blocks/{}", id(&user_id)?);
     state.session.call_empty(Method::DELETE, &path, None).await
+}
+
+// Realtime -----------------------------------------------------------------------
+
+/// Opens (or reopens) the live event connection for the signed-in user.
+#[tauri::command]
+pub async fn realtime_start(app: AppHandle, state: State<'_, AppState>) -> Result<()> {
+    state.realtime.start(app).await;
+    Ok(())
+}
+
+// Conversations and messages ------------------------------------------------------
+// Responses pass through unchanged; src/api.ts holds their types.
+
+#[tauri::command]
+pub async fn list_conversations(state: State<'_, AppState>) -> Result<Value> {
+    let mut v: Value = state
+        .session
+        .call(Method::GET, "v1/conversations", None)
+        .await?;
+    Ok(v["conversations"].take())
+}
+
+#[tauri::command]
+pub async fn get_conversation(
+    state: State<'_, AppState>,
+    conversation_id: String,
+) -> Result<Value> {
+    let path = format!("v1/conversations/{}", id(&conversation_id)?);
+    state.session.call(Method::GET, &path, None).await
+}
+
+#[tauri::command]
+pub async fn open_dm(state: State<'_, AppState>, user_id: String) -> Result<Value> {
+    let body = json!({ "user_id": id(&user_id)? });
+    state
+        .session
+        .call(Method::POST, "v1/conversations/dm", Some(body))
+        .await
+}
+
+#[tauri::command]
+pub async fn create_group(
+    state: State<'_, AppState>,
+    user_ids: Vec<String>,
+    name: String,
+) -> Result<Value> {
+    let ids = user_ids.iter().map(|u| id(u)).collect::<Result<Vec<_>>>()?;
+    let body = json!({ "user_ids": ids, "name": name });
+    state
+        .session
+        .call(Method::POST, "v1/conversations/group", Some(body))
+        .await
+}
+
+/// Messages in ascending order: the newest page, or those before/after a message id.
+#[tauri::command]
+pub async fn list_messages(
+    state: State<'_, AppState>,
+    conversation_id: String,
+    before: Option<String>,
+    after: Option<String>,
+) -> Result<Value> {
+    let mut path = format!(
+        "v1/conversations/{}/messages?limit=50",
+        id(&conversation_id)?
+    );
+    if let Some(b) = before.as_deref() {
+        path.push_str(&format!("&before={}", id(b)?));
+    }
+    if let Some(a) = after.as_deref() {
+        path.push_str(&format!("&after={}", id(a)?));
+    }
+    let mut v: Value = state.session.call(Method::GET, &path, None).await?;
+    Ok(v["messages"].take())
+}
+
+#[tauri::command]
+pub async fn send_message(
+    state: State<'_, AppState>,
+    conversation_id: String,
+    content: String,
+    nonce: String,
+) -> Result<Value> {
+    let path = format!("v1/conversations/{}/messages", id(&conversation_id)?);
+    state
+        .session
+        .call(
+            Method::POST,
+            &path,
+            Some(json!({ "content": content, "nonce": nonce })),
+        )
+        .await
+}
+
+#[tauri::command]
+pub async fn mark_read(
+    state: State<'_, AppState>,
+    conversation_id: String,
+    message_id: String,
+) -> Result<()> {
+    let path = format!("v1/conversations/{}/read", id(&conversation_id)?);
+    state
+        .session
+        .call_empty(
+            Method::POST,
+            &path,
+            Some(json!({ "message_id": id(&message_id)? })),
+        )
+        .await
 }

@@ -8,6 +8,12 @@
 //	PARLEY_LISTEN_ADDR    default ":8080"
 //	PARLEY_ACCESS_TTL     default "15m"
 //	PARLEY_REFRESH_TTL    default "720h"
+//	PARLEY_NATS_URL       NATS server for realtime events, e.g. "nats://localhost:4222".
+//	                      Without it nothing is pushed live (clients only see
+//	                      changes when they reload).
+//	PARLEY_REALTIME_PUBLIC_URL  WebSocket URL of the realtime service as clients
+//	                      reach it, e.g. "wss://chat.example.org/v1/realtime";
+//	                      advertised to clients via GET /v1/meta.
 //
 // Login lockout and account recovery settings are documented in config.go.
 package main
@@ -25,12 +31,15 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/nats-io/nats.go"
+
 	"parley/pkg/auth"
 	"parley/pkg/db"
 	"parley/pkg/events"
 	"parley/pkg/httpx"
 	"parley/services/api/internal/httpapi"
 	"parley/services/api/internal/identity"
+	"parley/services/api/internal/messaging"
 	"parley/services/api/internal/social"
 	"parley/services/api/migrations"
 )
@@ -96,14 +105,32 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	var pub events.Publisher = events.Discard{}
+	if natsURL := os.Getenv("PARLEY_NATS_URL"); natsURL != "" {
+		nc, err := nats.Connect(natsURL, nats.Name("parley-api"), nats.MaxReconnects(-1))
+		if err != nil {
+			return fmt.Errorf("PARLEY_NATS_URL: %w", err)
+		}
+		defer nc.Drain()
+		pub = events.NATS{Conn: nc}
+	} else {
+		slog.Warn("PARLEY_NATS_URL not set: realtime events are disabled")
+	}
+	socialSvc := social.NewService(pool, pub)
+
 	srv := &httpapi.Server{
-		Identity: ident,
-		Social:   social.NewService(pool, events.Discard{}), // NATS publisher arrives in milestone 2
-		Verifier: auth.NewVerifier(key.Public().(ed25519.PublicKey)),
-		Pool:     pool,
+		Identity:  ident,
+		Messaging: messaging.NewService(pool, socialSvc, pub),
+		Social:    socialSvc,
+		Verifier:  auth.NewVerifier(key.Public().(ed25519.PublicKey)),
+		Pool:      pool,
 
 		TrustedProxies: trusted,
+		RealtimeURL:    os.Getenv("PARLEY_REALTIME_PUBLIC_URL"),
 	}
+	// The realtime service verifies access tokens with this public key
+	// (its PARLEY_VERIFY_KEY).
+	slog.Info("access token public key", "PARLEY_VERIFY_KEY", auth.EncodePublicKey(key.Public().(ed25519.PublicKey)))
 	slog.Info("config",
 		"lockout_max_failures", lockout.MaxFailures, "lockout_duration", lockout.Duration.String(),
 		"lockout_scope", lockout.Scope, "email_recovery", recovery.EmailEnabled, "sms_recovery", recovery.SMSEnabled)

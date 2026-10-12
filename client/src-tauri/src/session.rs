@@ -42,7 +42,11 @@ impl SessionManager {
             .timeout(std::time::Duration::from_secs(30))
             .build()
             .expect("build http client");
-        Self { http, state: Mutex::new(None), secrets }
+        Self {
+            http,
+            state: Mutex::new(None),
+            secrets,
+        }
     }
 
     /// `email` and `phone` are optional recovery contacts (empty = none); the
@@ -101,6 +105,12 @@ impl SessionManager {
         }
     }
 
+    /// The server and a currently valid access token, refreshing if needed.
+    /// For connections the manager doesn't make itself (the realtime socket).
+    pub async fn bearer(&self) -> Result<(Url, String)> {
+        self.access_token(None).await
+    }
+
     /// Unauthenticated GET, for endpoints used before logging in.
     pub async fn public_get<T: DeserializeOwned>(&self, server: &Url, path: &str) -> Result<T> {
         decode(check(self.http.get(join(server, path)?).send().await?).await?).await
@@ -118,7 +128,15 @@ impl SessionManager {
         let mut guard = self.state.lock().await;
         let (server, token) = self.fresh_access(&mut guard, None).await?;
         let body = json!({ "current_password": current, "new_password": new });
-        let resp = self.send(&server, Method::POST, "v1/users/me/password", &token, Some(&body)).await?;
+        let resp = self
+            .send(
+                &server,
+                Method::POST,
+                "v1/users/me/password",
+                &token,
+                Some(&body),
+            )
+            .await?;
         let sess: Session = decode(check(resp).await?).await?;
         self.secrets.set(server.as_str(), &sess.refresh_token);
         let user = sess.user.clone();
@@ -127,7 +145,12 @@ impl SessionManager {
     }
 
     /// Authenticated request returning a JSON body.
-    pub async fn call<T: DeserializeOwned>(&self, method: Method, path: &str, body: Option<Value>) -> Result<T> {
+    pub async fn call<T: DeserializeOwned>(
+        &self,
+        method: Method,
+        path: &str,
+        body: Option<Value>,
+    ) -> Result<T> {
         decode(self.authed(method, path, body).await?).await
     }
 
@@ -138,17 +161,33 @@ impl SessionManager {
 
     async fn authed(&self, method: Method, path: &str, body: Option<Value>) -> Result<Response> {
         let (server, token) = self.access_token(None).await?;
-        let resp = self.send(&server, method.clone(), path, &token, body.as_ref()).await?;
+        let resp = self
+            .send(&server, method.clone(), path, &token, body.as_ref())
+            .await?;
         if resp.status() != StatusCode::UNAUTHORIZED {
             return check(resp).await;
         }
         // Token rejected (e.g. server key rotated): refresh once and retry.
         let (server, token) = self.access_token(Some(&token)).await?;
-        check(self.send(&server, method, path, &token, body.as_ref()).await?).await
+        check(
+            self.send(&server, method, path, &token, body.as_ref())
+                .await?,
+        )
+        .await
     }
 
-    async fn send(&self, server: &Url, method: Method, path: &str, token: &str, body: Option<&Value>) -> Result<Response> {
-        let mut req = self.http.request(method, join(server, path)?).bearer_auth(token);
+    async fn send(
+        &self,
+        server: &Url,
+        method: Method,
+        path: &str,
+        token: &str,
+        body: Option<&Value>,
+    ) -> Result<Response> {
+        let mut req = self
+            .http
+            .request(method, join(server, path)?)
+            .bearer_auth(token);
         if let Some(b) = body {
             req = req.json(b);
         }
@@ -163,7 +202,11 @@ impl SessionManager {
     }
 
     /// access_token's body, for callers that already hold the state lock.
-    async fn fresh_access(&self, guard: &mut Option<Active>, rejected: Option<&str>) -> Result<(Url, String)> {
+    async fn fresh_access(
+        &self,
+        guard: &mut Option<Active>,
+        rejected: Option<&str>,
+    ) -> Result<(Url, String)> {
         let active = guard.as_mut().ok_or(AppError::NotLoggedIn)?;
         let stale = match rejected {
             // Another request may already have refreshed past the rejected token.
@@ -175,7 +218,8 @@ impl SessionManager {
         }
         match self.refresh_call(&active.server, &active.refresh).await {
             Ok(sess) => {
-                self.secrets.set(active.server.as_str(), &sess.refresh_token);
+                self.secrets
+                    .set(active.server.as_str(), &sess.refresh_token);
                 active.user = sess.user;
                 active.access = sess.access_token;
                 active.access_exp = sess.access_expires_at;
@@ -193,11 +237,26 @@ impl SessionManager {
     }
 
     async fn refresh_call(&self, server: &Url, refresh: &str) -> Result<Session> {
-        decode(self.post(server, "v1/auth/refresh", &json!({ "refresh_token": refresh })).await?).await
+        decode(
+            self.post(
+                server,
+                "v1/auth/refresh",
+                &json!({ "refresh_token": refresh }),
+            )
+            .await?,
+        )
+        .await
     }
 
     async fn post(&self, server: &Url, path: &str, body: &Value) -> Result<Response> {
-        check(self.http.post(join(server, path)?).json(body).send().await?).await
+        check(
+            self.http
+                .post(join(server, path)?)
+                .json(body)
+                .send()
+                .await?,
+        )
+        .await
     }
 
     async fn start(&self, server: &Url, sess: Session) -> User {
@@ -236,10 +295,17 @@ pub fn normalize_server(input: &str) -> Result<Url> {
     if input.is_empty() {
         return Err(AppError::InvalidServer("enter a server address".into()));
     }
-    let with_scheme = if input.contains("://") { input.to_string() } else { format!("https://{input}") };
-    let mut url = Url::parse(&with_scheme).map_err(|e| AppError::InvalidServer(format!("invalid server address: {e}")))?;
+    let with_scheme = if input.contains("://") {
+        input.to_string()
+    } else {
+        format!("https://{input}")
+    };
+    let mut url = Url::parse(&with_scheme)
+        .map_err(|e| AppError::InvalidServer(format!("invalid server address: {e}")))?;
     if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
-        return Err(AppError::InvalidServer("server address must be an http(s) URL".into()));
+        return Err(AppError::InvalidServer(
+            "server address must be an http(s) URL".into(),
+        ));
     }
     url.set_query(None);
     url.set_fragment(None);
@@ -251,7 +317,9 @@ pub fn normalize_server(input: &str) -> Result<Url> {
 }
 
 fn join(server: &Url, path: &str) -> Result<Url> {
-    server.join(path).map_err(|e| AppError::Internal(e.to_string()))
+    server
+        .join(path)
+        .map_err(|e| AppError::Internal(e.to_string()))
 }
 
 async fn check(resp: Response) -> Result<Response> {
@@ -260,8 +328,14 @@ async fn check(resp: Response) -> Result<Response> {
         return Ok(resp);
     }
     Err(match resp.json::<ErrorBody>().await {
-        Ok(b) => AppError::Api { code: b.code, message: b.message },
-        Err(_) => AppError::Api { code: format!("http_{}", status.as_u16()), message: format!("server returned {status}") },
+        Ok(b) => AppError::Api {
+            code: b.code,
+            message: b.message,
+        },
+        Err(_) => AppError::Api {
+            code: format!("http_{}", status.as_u16()),
+            message: format!("server returned {status}"),
+        },
     })
 }
 
@@ -270,13 +344,13 @@ async fn decode<T: DeserializeOwned>(resp: Response) -> Result<T> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use std::collections::HashMap;
     use std::sync::{Arc, Mutex as StdMutex};
 
     #[derive(Default, Clone)]
-    struct MemoryStore(Arc<StdMutex<HashMap<String, String>>>);
+    pub(crate) struct MemoryStore(Arc<StdMutex<HashMap<String, String>>>);
 
     impl SecretStore for MemoryStore {
         fn get(&self, account: &str) -> Option<String> {
@@ -292,16 +366,27 @@ mod tests {
 
     /// Against a live api server (`PARLEY_TEST_API_URL`), ideally started with a
     /// short PARLEY_ACCESS_TTL so that every call needs a refresh.
-    fn live_server() -> Option<Url> {
-        std::env::var("PARLEY_TEST_API_URL").ok().map(|u| normalize_server(&u).unwrap())
+    pub(crate) fn live_server() -> Option<Url> {
+        std::env::var("PARLEY_TEST_API_URL")
+            .ok()
+            .map(|u| normalize_server(&u).unwrap())
     }
 
-    fn reg<'a>(username: &'a str, display_name: &'a str) -> Registration<'a> {
-        Registration { username, password: "plum-orbit-candle-42", display_name, email: "", phone: "" }
+    pub(crate) fn reg<'a>(username: &'a str, display_name: &'a str) -> Registration<'a> {
+        Registration {
+            username,
+            password: "plum-orbit-candle-42",
+            display_name,
+            email: "",
+            phone: "",
+        }
     }
 
-    fn unique(prefix: &str) -> String {
-        let n = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+    pub(crate) fn unique(prefix: &str) -> String {
+        let n = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
         format!("{prefix}{}", n % 1_000_000_000_000)
     }
 
@@ -313,24 +398,37 @@ mod tests {
         };
         let store = MemoryStore::default();
         let mgr = Arc::new(SessionManager::new(Box::new(store.clone())));
-        let user = mgr.register(&server, &reg(&unique("rt"), "")).await.unwrap();
+        let user = mgr
+            .register(&server, &reg(&unique("rt"), ""))
+            .await
+            .unwrap();
 
         // Fire many calls at once. Each sees a near-expiry token and wants to refresh;
         // if two refreshed with the same token the server would revoke the session.
         for round in 0..3 {
             let calls = (0..25).map(|_| {
                 let mgr = mgr.clone();
-                tokio::spawn(async move { mgr.call::<serde_json::Value>(Method::GET, "v1/users/me", None).await })
+                tokio::spawn(async move {
+                    mgr.call::<serde_json::Value>(Method::GET, "v1/users/me", None)
+                        .await
+                })
             });
             for c in calls {
-                let me = c.await.unwrap().unwrap_or_else(|e| panic!("round {round}: {e}"));
+                let me = c
+                    .await
+                    .unwrap()
+                    .unwrap_or_else(|e| panic!("round {round}: {e}"));
                 assert_eq!(me["id"], user.id.as_str());
             }
         }
 
         // The keychain copy must be the newest token: a fresh manager can resume with it.
         let resumed = SessionManager::new(Box::new(store.clone()));
-        let restored = resumed.restore(&server).await.unwrap().expect("session restored");
+        let restored = resumed
+            .restore(&server)
+            .await
+            .unwrap()
+            .expect("session restored");
         assert_eq!(restored.id, user.id);
     }
 
@@ -349,18 +447,30 @@ mod tests {
         let background: Vec<_> = (0..10)
             .map(|_| {
                 let mgr = mgr.clone();
-                tokio::spawn(async move { mgr.call::<serde_json::Value>(Method::GET, "v1/users/me", None).await })
+                tokio::spawn(async move {
+                    mgr.call::<serde_json::Value>(Method::GET, "v1/users/me", None)
+                        .await
+                })
             })
             .collect();
-        mgr.change_password("plum-orbit-candle-42", "velvet-thunder-pine").await.unwrap();
+        mgr.change_password("plum-orbit-candle-42", "velvet-thunder-pine")
+            .await
+            .unwrap();
         for b in background {
-            b.await.unwrap().expect("concurrent call during password change");
+            b.await
+                .unwrap()
+                .expect("concurrent call during password change");
         }
 
         // Still signed in.
-        mgr.call::<serde_json::Value>(Method::GET, "v1/users/me", None).await.unwrap();
+        mgr.call::<serde_json::Value>(Method::GET, "v1/users/me", None)
+            .await
+            .unwrap();
 
-        match mgr.change_password("wrong-password-x", "another-fine-phrase").await {
+        match mgr
+            .change_password("wrong-password-x", "another-fine-phrase")
+            .await
+        {
             Err(AppError::Api { code, .. }) => assert_eq!(code, "bad_credentials"),
             other => panic!("expected bad_credentials, got {other:?}"),
         }
@@ -384,27 +494,55 @@ mod tests {
         a.register(&server, &reg(&a_name, "")).await.unwrap();
         let b_user = b.register(&server, &reg(&b_name, "B")).await.unwrap();
 
-        let sent: crate::api::SendResult =
-            a.call(Method::POST, "v1/friends/requests", Some(json!({ "username": b_name }))).await.unwrap();
+        let sent: crate::api::SendResult = a
+            .call(
+                Method::POST,
+                "v1/friends/requests",
+                Some(json!({ "username": b_name })),
+            )
+            .await
+            .unwrap();
         let req_id = sent.request.unwrap().id;
-        let _: crate::api::Friend =
-            b.call(Method::POST, &format!("v1/friends/requests/{req_id}/accept"), None).await.unwrap();
-        let friends: crate::api::FriendsList = a.call(Method::GET, "v1/friends", None).await.unwrap();
+        let _: crate::api::Friend = b
+            .call(
+                Method::POST,
+                &format!("v1/friends/requests/{req_id}/accept"),
+                None,
+            )
+            .await
+            .unwrap();
+        let friends: crate::api::FriendsList =
+            a.call(Method::GET, "v1/friends", None).await.unwrap();
         assert_eq!(friends.friends.len(), 1);
         assert_eq!(friends.friends[0].user.id, b_user.id);
 
         // API errors come back with the server's code.
-        match a.call::<serde_json::Value>(Method::POST, "v1/friends/requests", Some(json!({ "username": b_name }))).await {
+        match a
+            .call::<serde_json::Value>(
+                Method::POST,
+                "v1/friends/requests",
+                Some(json!({ "username": b_name })),
+            )
+            .await
+        {
             Err(AppError::Api { code, .. }) => assert_eq!(code, "already_friends"),
             other => panic!("expected already_friends, got {other:?}"),
         }
 
         let store = MemoryStore::default();
         let c = SessionManager::new(Box::new(store.clone()));
-        c.login(&server, &a_name, "plum-orbit-candle-42").await.unwrap();
+        c.login(&server, &a_name, "plum-orbit-candle-42")
+            .await
+            .unwrap();
         c.logout().await;
-        assert!(store.get(server.as_str()).is_none(), "logout must clear the keychain");
-        assert!(matches!(c.call_empty(Method::GET, "v1/friends", None).await, Err(AppError::NotLoggedIn)));
+        assert!(
+            store.get(server.as_str()).is_none(),
+            "logout must clear the keychain"
+        );
+        assert!(matches!(
+            c.call_empty(Method::GET, "v1/friends", None).await,
+            Err(AppError::NotLoggedIn)
+        ));
         assert!(c.restore(&server).await.unwrap().is_none());
     }
 
@@ -414,11 +552,18 @@ mod tests {
             ("chat.example.org", "https://chat.example.org/"),
             ("  https://chat.example.org  ", "https://chat.example.org/"),
             ("http://localhost:8080", "http://localhost:8080/"),
-            ("https://example.org/parley?x=1#y", "https://example.org/parley/"),
+            (
+                "https://example.org/parley?x=1#y",
+                "https://example.org/parley/",
+            ),
             ("https://example.org/parley/", "https://example.org/parley/"),
         ];
         for (input, want) in cases {
-            assert_eq!(normalize_server(input).unwrap().as_str(), want, "input {input:?}");
+            assert_eq!(
+                normalize_server(input).unwrap().as_str(),
+                want,
+                "input {input:?}"
+            );
         }
         for bad in ["", "ftp://example.org", "https://", "http://exa mple.org"] {
             assert!(normalize_server(bad).is_err(), "accepted {bad:?}");

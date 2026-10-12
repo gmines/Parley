@@ -1,6 +1,7 @@
 // Typed wrappers around the Rust commands in src-tauri/src/commands.rs.
 // The Rust core holds the tokens and talks to the server; this side only sees data.
 import { invoke } from "@tauri-apps/api/core";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
 export interface User {
   id: string;
@@ -55,6 +56,42 @@ export interface SendResult {
   friendship?: Friend;
 }
 
+export interface Message {
+  id: string;
+  conversation_id: string;
+  author: UserRef | null; // null if the account was deleted
+  content: string;
+  created_at: string;
+  nonce?: string;
+}
+
+export interface Conversation {
+  id: string;
+  kind: "dm" | "group";
+  name?: string;
+  members: UserRef[];
+  created_at: string;
+  last_message: Message | null;
+  last_read_message_id: string | null;
+  unread_count: number; // capped at 100
+}
+
+/** An event pushed by the realtime service (see api/events.md). */
+export interface RealtimeEvent {
+  type: string;
+  data: any;
+}
+
+export type RealtimeState = "connecting" | "connected" | "disconnected" | "signed_out";
+
+export function onRealtimeEvent(fn: (e: RealtimeEvent) => void): Promise<UnlistenFn> {
+  return listen<RealtimeEvent>("realtime-event", (e) => fn(e.payload));
+}
+
+export function onRealtimeStatus(fn: (s: RealtimeState) => void): Promise<UnlistenFn> {
+  return listen<{ state: RealtimeState }>("realtime-status", (e) => fn(e.payload.state));
+}
+
 export interface AppError {
   code: string;
   message: string;
@@ -92,6 +129,17 @@ export const api = {
     invoke<void>("set_contact", { kind, value, password }),
   verifyContact: (kind: ContactKind, code: string) => invoke<User>("verify_contact", { kind, code }),
   removeContact: (kind: ContactKind, password: string) => invoke<User>("remove_contact", { kind, password }),
+
+  realtimeStart: () => invoke<void>("realtime_start"),
+  listConversations: () => invoke<Conversation[]>("list_conversations"),
+  getConversation: (conversationId: string) => invoke<Conversation>("get_conversation", { conversationId }),
+  openDm: (userId: string) => invoke<Conversation>("open_dm", { userId }),
+  createGroup: (userIds: string[], name: string) => invoke<Conversation>("create_group", { userIds, name }),
+  listMessages: (conversationId: string, opts: { before?: string; after?: string } = {}) =>
+    invoke<Message[]>("list_messages", { conversationId, before: opts.before ?? null, after: opts.after ?? null }),
+  sendMessage: (conversationId: string, content: string, nonce: string) =>
+    invoke<Message>("send_message", { conversationId, content, nonce }),
+  markRead: (conversationId: string, messageId: string) => invoke<void>("mark_read", { conversationId, messageId }),
 
   listFriends: () => invoke<Friend[]>("list_friends"),
   removeFriend: (userId: string) => invoke<void>("remove_friend", { userId }),

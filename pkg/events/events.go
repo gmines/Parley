@@ -23,6 +23,9 @@ const (
 	FriendRequestRemoved = "friend_request.removed"
 	FriendshipCreated    = "friendship.created"
 	FriendshipRemoved    = "friendship.removed"
+	ConversationCreated  = "conversation.created"
+	ConversationRead     = "conversation.read"
+	MessageCreated       = "message.created"
 )
 
 type Publisher interface {

@@ -102,3 +102,18 @@ func ParsePrivateKey(b64Seed string) (ed25519.PrivateKey, error) {
 	}
 	return ed25519.NewKeyFromSeed(seed), nil
 }
+
+// EncodePublicKey returns the base64 (std encoding) form of a verification key.
+func EncodePublicKey(k ed25519.PublicKey) string { return base64.StdEncoding.EncodeToString(k) }
+
+// ParsePublicKey decodes a base64 (std encoding) Ed25519 public key.
+func ParsePublicKey(b64 string) (ed25519.PublicKey, error) {
+	k, err := base64.StdEncoding.DecodeString(b64)
+	if err != nil {
+		return nil, fmt.Errorf("decode verify key: %w", err)
+	}
+	if len(k) != ed25519.PublicKeySize {
+		return nil, fmt.Errorf("verify key must be %d bytes, got %d", ed25519.PublicKeySize, len(k))
+	}
+	return ed25519.PublicKey(k), nil
+}
