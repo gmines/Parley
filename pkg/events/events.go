@@ -26,6 +26,10 @@ const (
 	ConversationCreated  = "conversation.created"
 	ConversationRead     = "conversation.read"
 	MessageCreated       = "message.created"
+	CallStarted          = "call.started"  // first person joined: other members' clients ring
+	CallUpdated          = "call.updated"  // participants changed
+	CallEnded            = "call.ended"    // last person left
+	CallDeclined         = "call.declined" // a member declined to join
 )
 
 type Publisher interface {

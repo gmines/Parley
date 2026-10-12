@@ -1,0 +1,15 @@
+# Kamailio (official packages from deb.kamailio.org) as Parley's SIP edge.
+#   podman build -f voice/kamailio/Containerfile -t parley/kamailio voice/kamailio
+FROM debian:bookworm-slim
+ARG KAMAILIO_SERIES=61
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl gnupg \
+    && curl -fsSL https://deb.kamailio.org/kamailiodebkey.gpg | gpg --dearmor -o /usr/share/keyrings/kamailio.gpg \
+    && echo "deb [signed-by=/usr/share/keyrings/kamailio.gpg] https://deb.kamailio.org/kamailio${KAMAILIO_SERIES} bookworm main" \
+         > /etc/apt/sources.list.d/kamailio.list \
+    && apt-get update && apt-get install -y --no-install-recommends kamailio kamailio-extra-modules kamailio-autheph-modules gettext-base netbase \
+    && apt-get purge -y gnupg curl && apt-get autoremove -y && rm -rf /var/lib/apt/lists/*
+COPY kamailio.cfg.tmpl /etc/kamailio/kamailio.cfg.tmpl
+COPY entrypoint.sh /usr/local/bin/entrypoint.sh
+USER kamailio
+# Kamailio runs with -DD (foreground, but still forking workers) and -E (log to stderr).
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]

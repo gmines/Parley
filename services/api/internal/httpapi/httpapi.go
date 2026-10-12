@@ -30,6 +30,9 @@ type Server struct {
 	// RealtimeURL is the WebSocket URL clients connect to for live events
 	// (served by the realtime service), advertised via GET /v1/meta.
 	RealtimeURL string
+	// VoiceURL is the base URL of the voice-control service (call join
+	// credentials), advertised via GET /v1/meta. Empty: same as the api.
+	VoiceURL string
 }
 
 func (s *Server) Handler() http.Handler {

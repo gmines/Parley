@@ -1,0 +1,59 @@
+# Asterisk 22 LTS for Parley: the media server. It mixes call audio in ARI
+# bridges controlled by the voice-control service; Kamailio sits in front.
+#
+# Build from the repo root:
+#   podman build -f voice/asterisk/Containerfile -t parley/asterisk voice/asterisk
+#
+# WITH_OPUS=1 (default) downloads Sangoma's free but closed-source codec_opus,
+# needed to mix Opus calls. By building with it you accept Sangoma's license
+# (see voice/README.md): it may not be redistributed, so never publish an
+# image built with WITH_OPUS=1. It also reports anonymous usage statistics
+# daily. With WITH_OPUS=0 calls use G.722.
+ARG DEBIAN=debian:bookworm-slim
+
+FROM ${DEBIAN} AS build
+ARG ASTERISK_VERSION=22.11.0
+ARG ASTERISK_SHA256=3bd5ee040509a3d3cd9b1ba9520c18e6ec0a7e7981ca68c457dcd36ba3c54d94
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      build-essential ca-certificates curl pkg-config autoconf automake libtool \
+      libedit-dev libjansson-dev libxml2-dev libsqlite3-dev uuid-dev libssl-dev \
+      libsrtp2-dev libcurl4-openssl-dev bzip2 patch python3 \
+    && rm -rf /var/lib/apt/lists/*
+WORKDIR /src
+RUN curl -fsSLO https://downloads.asterisk.org/pub/telephony/asterisk/releases/asterisk-${ASTERISK_VERSION}.tar.gz \
+    && echo "${ASTERISK_SHA256}  asterisk-${ASTERISK_VERSION}.tar.gz" | sha256sum -c - \
+    && tar xzf asterisk-${ASTERISK_VERSION}.tar.gz --strip-components=1
+RUN ./configure --with-pjproject-bundled --with-jansson-bundled --without-x11 --without-gtk2 >/dev/null \
+    && make menuselect.makeopts \
+    && menuselect/menuselect --disable BUILD_NATIVE \
+         --disable-category MENUSELECT_CDR --disable-category MENUSELECT_CEL \
+         --disable chan_iax2 --disable chan_unistim \
+         --disable res_hep --disable res_hep_pjsip --disable res_hep_rtcp \
+         menuselect.makeopts \
+    && make -j"$(nproc)" \
+    && make install DESTDIR=/out \
+    && (strip --strip-unneeded /out/usr/sbin/asterisk /out/usr/lib/asterisk/modules/*.so 2>/dev/null || true)
+
+ARG WITH_OPUS=1
+ARG OPUS_SHA256=889e6b3d7f096c84271e9b10c1a2050382738bd2dda82e1fc76cb1e10472e20d
+RUN if [ "$WITH_OPUS" = 1 ]; then \
+      curl -fsSLO https://downloads.digium.com/pub/telephony/codec_opus/asterisk-22.0/x86-64/codec_opus-22.0_1.3.0-x86_64.tar.gz \
+      && echo "${OPUS_SHA256}  codec_opus-22.0_1.3.0-x86_64.tar.gz" | sha256sum -c - \
+      && tar xzf codec_opus-22.0_1.3.0-x86_64.tar.gz \
+      && cp codec_opus-22.0_1.3.0-x86_64/codec_opus.so /out/usr/lib/asterisk/modules/ \
+      && cp codec_opus-22.0_1.3.0-x86_64/codec_opus_config-en_US.xml /out/var/lib/asterisk/documentation/thirdparty/ ; \
+    fi
+
+FROM ${DEBIAN}
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      libedit2 libjansson4 libxml2 libsqlite3-0 libuuid1 libssl3 libsrtp2-1 libcurl4 \
+      gettext-base ca-certificates \
+    && rm -rf /var/lib/apt/lists/* \
+    && useradd --system --home-dir /var/lib/asterisk asterisk
+COPY --from=build /out/ /
+RUN ldconfig && rm -rf /etc/asterisk && mkdir -p /etc/asterisk /var/run/asterisk \
+    && chown -R asterisk:asterisk /var/lib/asterisk /var/spool/asterisk /var/log/asterisk /var/run/asterisk /etc/asterisk
+COPY config/ /usr/share/parley-asterisk/
+COPY entrypoint.sh /usr/local/bin/entrypoint.sh
+USER asterisk
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]

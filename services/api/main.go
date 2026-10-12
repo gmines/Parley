@@ -14,6 +14,8 @@
 //	PARLEY_REALTIME_PUBLIC_URL  WebSocket URL of the realtime service as clients
 //	                      reach it, e.g. "wss://chat.example.org/v1/realtime";
 //	                      advertised to clients via GET /v1/meta.
+//	PARLEY_VOICE_PUBLIC_URL     base URL of voice-control as clients reach it,
+//	                      e.g. "https://chat.example.org"; empty = same as the api.
 //
 // Login lockout and account recovery settings are documented in config.go.
 package main
@@ -128,6 +130,7 @@ func run() error {
 
 		TrustedProxies: trusted,
 		RealtimeURL:    os.Getenv("PARLEY_REALTIME_PUBLIC_URL"),
+		VoiceURL:       os.Getenv("PARLEY_VOICE_PUBLIC_URL"),
 	}
 	// The realtime service verifies access tokens with this public key
 	// (its PARLEY_VERIFY_KEY).

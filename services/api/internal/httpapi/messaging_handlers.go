@@ -17,6 +17,7 @@ func (s *Server) meta(w http.ResponseWriter, r *http.Request) error {
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{
 		"server":         buildinfo.Get(),
 		"realtime_url":   s.RealtimeURL,
+		"voice_url":      s.VoiceURL,
 		"email_recovery": f.EmailRecovery,
 		"sms_recovery":   f.SMSRecovery,
 	})

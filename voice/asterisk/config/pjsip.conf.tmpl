@@ -1,0 +1,35 @@
+; Asterisk only talks SIP to Kamailio, over loopback. Kamailio authenticates
+; users and adds X-Parley-User; clients never reach Asterisk's SIP port.
+[global]
+type = global
+user_agent = Parley
+endpoint_identifier_order = ip
+
+[transport-kamailio]
+type = transport
+protocol = udp
+bind = 127.0.0.1:${PARLEY_SIP_PORT}
+
+[kamailio]
+type = endpoint
+transport = transport-kamailio
+context = parley
+disallow = all
+allow = ${PARLEY_CODECS}
+; Always relay media through Asterisk, never peer to peer.
+direct_media = no
+; NAT: answer audio to wherever it actually comes from.
+rtp_symmetric = yes
+force_rport = yes
+rewrite_contact = yes
+; The address clients send audio to; loopback signaling would otherwise put
+; 127.0.0.1 in the SDP.
+media_address = ${PARLEY_MEDIA_IP}
+media_encryption = sdes
+dtmf_mode = none
+timers = no
+
+[kamailio]
+type = identify
+endpoint = kamailio
+match = 127.0.0.1

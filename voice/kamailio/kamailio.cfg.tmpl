@@ -1,0 +1,180 @@
+#!KAMAILIO
+#
+# Parley SIP edge. Clients never register: they only send an INVITE to a call
+# room (sip:<conversation id>@<host>) when joining a call, authenticated with
+# short-lived credentials minted by voice-control. Kamailio checks them, makes
+# sure they're for this room, tags the request with the verified user, and
+# relays it to Asterisk on loopback. Media goes client <-> Asterisk directly.
+#
+# Environment:
+#   PARLEY_SIP_SECRET     shared with voice-control (HMAC key). Required.
+#   PARLEY_SIP_ASTERISK   where Asterisk listens, e.g. "sip:127.0.0.1:5080"
+#   PARLEY_SIP_ADVERTISE  host[:port] clients reach this server on (LAN/public IP)
+
+# (rendered from this template by entrypoint.sh)
+
+#!define FLT_NATS 5
+#!define FLB_NATB 6
+#!define REALM "parley"
+
+####### Global parameters #########
+debug=2
+log_stderror=yes
+fork=yes
+children=4
+auto_aliases=no
+
+listen=udp:0.0.0.0:5060 advertise ${PARLEY_SIP_ADVERTISE}
+listen=tcp:0.0.0.0:5060 advertise ${PARLEY_SIP_ADVERTISE}
+
+# Keep idle client TCP connections (the call's signaling path) open.
+tcp_connection_lifetime=3605
+tcp_keepalive=yes
+tcp_keepidle=30
+tcp_accept_no_cl=yes
+
+####### Modules ########
+loadmodule "kex.so"
+loadmodule "corex.so"
+loadmodule "tm.so"
+loadmodule "tmx.so"
+loadmodule "sl.so"
+loadmodule "rr.so"
+loadmodule "pv.so"
+loadmodule "maxfwd.so"
+loadmodule "textops.so"
+loadmodule "siputils.so"
+loadmodule "xlog.so"
+loadmodule "sanity.so"
+loadmodule "nathelper.so"
+loadmodule "auth.so"
+loadmodule "auth_ephemeral.so"
+
+modparam("tm", "failure_reply_mode", 3)
+modparam("tm", "fr_timer", 30000)
+modparam("tm", "fr_inv_timer", 120000)
+modparam("rr", "enable_full_lr", 0)
+modparam("rr", "append_fromtag", 0)
+modparam("auth_ephemeral", "secret", "${PARLEY_SIP_SECRET}")
+modparam("auth_ephemeral", "username_format", 1)
+
+####### Routing ########
+
+request_route {
+	route(REQINIT);
+	route(NATDETECT);
+
+	if (is_method("CANCEL")) {
+		if (t_check_trans()) {
+			route(RELAY);
+		}
+		exit;
+	}
+	if (!is_method("ACK")) {
+		if (t_precheck_trans()) {
+			t_check_trans();
+			exit;
+		}
+		t_check_trans();
+	}
+
+	route(WITHINDLG);
+
+	# Out of dialog: only joining a call (INVITE), plus OPTIONS pings.
+	if (is_method("OPTIONS")) {
+		sl_send_reply("200", "OK");
+		exit;
+	}
+	if (!is_method("INVITE")) {
+		sl_send_reply("405", "Method Not Allowed");
+		exit;
+	}
+
+	route(AUTH);
+
+	# Never trust an identity header from the client; set the verified one.
+	remove_hf("X-Parley-User");
+	append_hf("X-Parley-User: $var(user)\r\n");
+
+	record_route();
+	$du = "${PARLEY_SIP_ASTERISK}";
+	route(RELAY);
+}
+
+route[REQINIT] {
+	if (!mf_process_maxfwd_header("10")) {
+		sl_send_reply("483", "Too Many Hops");
+		exit;
+	}
+	if (!sanity_check("17895", "7")) {
+		xlog("L_WARN", "malformed SIP message from $si:$sp\n");
+		exit;
+	}
+}
+
+# Clients are assumed to be behind NAT: reply to the packet's real source and
+# rewrite their Contact so in-dialog requests (e.g. BYE from Asterisk) reach them.
+route[NATDETECT] {
+	force_rport();
+	if (nat_uac_test("19")) {
+		if (is_first_hop()) {
+			set_contact_alias();
+		}
+		setflag(FLT_NATS);
+	}
+}
+
+route[WITHINDLG] {
+	if (!has_totag()) return;
+	if (loose_route()) {
+		if (!isdsturiset()) {
+			handle_ruri_alias();
+		}
+		route(RELAY);
+		exit;
+	}
+	if (is_method("ACK")) {
+		if (t_check_trans()) {
+			route(RELAY);
+		}
+		exit;
+	}
+	sl_send_reply("404", "Not here");
+	exit;
+}
+
+# Credentials: username "<expiry>:<user id>.<conversation id>", password
+# base64(HMAC-SHA1(secret, username)). They only open the room they name.
+route[AUTH] {
+	if (!autheph_proxy(REALM)) {
+		auth_challenge(REALM, "0");
+		exit;
+	}
+	# $au holds "<user id>.<conversation id>" (Kamailio strips the "<expiry>:"
+	# prefix); take the last ':' field so either form works.
+	$var(ident) = $(au{s.select,-1,:});
+	$var(user) = $(var(ident){s.select,0,.});
+	$var(room) = $(var(ident){s.select,1,.});
+	if ($var(room) != $rU) {
+		xlog("L_WARN", "user $var(user) tried room $rU with credentials for $var(room)\n");
+		sl_send_reply("403", "Forbidden");
+		exit;
+	}
+	consume_credentials();
+}
+
+route[RELAY] {
+	if (is_method("INVITE|BYE|UPDATE|CANCEL|ACK")) {
+		t_on_reply("MANAGE_REPLY");
+	}
+	if (!t_relay()) {
+		sl_reply_error();
+	}
+	exit;
+}
+
+onreply_route[MANAGE_REPLY] {
+	if (status =~ "[12][0-9][0-9]" && nat_uac_test("19")) {
+		set_contact_alias();
+	}
+}

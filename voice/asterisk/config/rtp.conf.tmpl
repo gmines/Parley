@@ -1,0 +1,8 @@
+[general]
+rtpstart = ${PARLEY_RTP_START}
+rtpend = ${PARLEY_RTP_END}
+; Accept media only from the address it starts arriving from, then stick to it
+; (symmetric RTP latching: clients behind NAT get audio back on the same path).
+strictrtp = seqno
+; TURN/ICE fallback is phase 4.
+icesupport = no

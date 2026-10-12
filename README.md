@@ -10,9 +10,9 @@ A minimal, self-hostable alternative to Discord with two features: **text chat**
 | `services/api`: accounts, sessions, friend graph, message history | Go, Postgres | **identity + social done** |
 | `services/api` messaging: DMs, group DMs, history, unread | Go, Postgres | **done** |
 | `services/realtime`: live events over WebSocket | Go, NATS | **done** (presence pending) |
-| `services/voice-control`: call/room lifecycle, SIP + TURN credentials | Go, Asterisk ARI | milestone 4 |
-| `voice/kamailio`: SIP edge, NAT fix-up, load balancing | Kamailio | milestone 4 |
-| `voice/asterisk`: audio media, ConfBridge group calls | Asterisk (PJSIP) | milestone 4 |
+| `services/voice-control`: call rooms, SIP credentials, Asterisk control (ARI) | Go | **done** (server side) |
+| `voice/kamailio`: SIP edge, auth, NAT fix-up | Kamailio 6.1 | **done** |
+| `voice/asterisk`: media server, mixing bridges, Opus/G.722, SRTP | Asterisk 22 LTS | **done** (see [voice/README.md](voice/README.md)) |
 | `voice/coturn`: TURN relay when UDP is blocked | coturn | milestone 5 |
 | `client`: desktop app for Windows, macOS and Linux | Tauri (+ pjsip for voice) | **text chat done**; voice next |
 | `deploy`: Kubernetes | Helm, CloudNativePG | milestone 6 |
@@ -125,3 +125,9 @@ services/api/       internal/{identity,social,messaging,delivery,httpapi}, migra
 services/realtime/  WebSocket gateway (NATS subject per user → connections)
 api/            OpenAPI spec and realtime event catalogue
 ```
+
+## License
+
+Parley is licensed under the [GNU General Public License v2.0](LICENSE) (GPL-2.0-only).
+The desktop client links [pjproject](https://github.com/pjsip/pjproject) (GPLv2) for
+voice. The server-side voice components, Asterisk and Kamailio, are also GPLv2.

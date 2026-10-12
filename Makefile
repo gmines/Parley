@@ -2,7 +2,7 @@ CONTAINER ?= podman
 TEST_PG    := parley-test-pg
 TEST_DB    := postgres://postgres:parley@localhost:55432/parley?sslmode=disable
 
-.PHONY: build test test-unit test-db test-db-stop dev-nats lint image-api image-realtime run-api
+.PHONY: build test test-unit test-db test-db-stop dev-nats lint image-api image-realtime image-voice-control image-asterisk image-kamailio image-pjsua run-api
 
 build:
 	go build ./...
@@ -38,6 +38,21 @@ image-api:
 
 image-realtime:
 	$(CONTAINER) build -f services/realtime/Dockerfile -t parley/realtime:dev .
+
+image-voice-control:
+	$(CONTAINER) build -f services/voice-control/Dockerfile -t parley/voice-control:dev .
+
+# Voice media stack (see voice/README.md; WITH_OPUS=0 for an all-open-source build).
+WITH_OPUS ?= 1
+image-asterisk:
+	$(CONTAINER) build --build-arg WITH_OPUS=$(WITH_OPUS) -f voice/asterisk/Containerfile -t parley/asterisk:dev voice/asterisk
+
+image-kamailio:
+	$(CONTAINER) build -f voice/kamailio/Containerfile -t parley/kamailio:dev voice/kamailio
+
+# Test-only SIP client for voice/test/call_test.py.
+image-pjsua:
+	$(CONTAINER) build -f voice/test/pjsua.Containerfile -t parley/pjsua:dev voice/test
 
 # Runs the api locally against the test database with an ephemeral signing key.
 run-api: test-db
