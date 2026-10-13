@@ -3,9 +3,24 @@
 
 #include <pjsua-lib/pjsua.h>
 #include <pjmedia-codec/opus.h>
+#include <stdio.h>
 #include <string.h>
 
 #define THIS_FILE "parley_voice"
+
+/* Echo canceller and the sound device rate it runs at. AEC3 handles 48 kHz
+ * (it splits the signal into bands itself). pjmedia drives the legacy WebRTC
+ * AEC with a single band, which aborts above 16 kHz (num_bands assertion), so
+ * that one only runs with the sound device at 16 kHz. */
+#if defined(PJMEDIA_HAS_WEBRTC_AEC3) && PJMEDIA_HAS_WEBRTC_AEC3 != 0
+#define PV_EC_ALGO PJMEDIA_ECHO_WEBRTC_AEC3
+#define PV_SND_RATE 48000
+#else
+#define PV_EC_ALGO PJMEDIA_ECHO_WEBRTC
+#define PV_SND_RATE 16000
+#endif
+#define PV_EC_OPTIONS (PV_EC_ALGO | PJMEDIA_ECHO_USE_NOISE_SUPPRESSOR | PJMEDIA_ECHO_AGGRESSIVENESS_DEFAULT)
+#define PV_EC_TAIL_MS 200
 
 #if defined(_MSC_VER)
 #define PV_THREAD_LOCAL __declspec(thread)
@@ -148,12 +163,12 @@ int pv_init(const pv_options *opt, pv_event_cb cb, void *ctx) {
     pjsua_media_config media;
     pjsua_media_config_default(&media);
     media.clock_rate = 48000;
-    media.snd_clock_rate = 48000;
+    media.snd_clock_rate = PV_SND_RATE;
     media.channel_count = 1;
     media.no_vad = PJ_TRUE;
-    /* Echo cancellation (WebRTC AEC, bundled) with noise suppression. */
-    media.ec_tail_len = 200;
-    media.ec_options = PJMEDIA_ECHO_WEBRTC | PJMEDIA_ECHO_USE_NOISE_SUPPRESSOR | PJMEDIA_ECHO_AGGRESSIVENESS_DEFAULT;
+    /* Echo cancellation with noise suppression (see PV_EC_ALGO). */
+    media.ec_tail_len = PV_EC_TAIL_MS;
+    media.ec_options = PV_EC_OPTIONS;
     /* Adaptive jitter buffer: start small, grow with network jitter. */
     media.jb_init = -1;
     media.jb_min_pre = -1;
@@ -340,4 +355,36 @@ int pv_test_record(const char *wav_path) {
     if (pjsua_recorder_create(&path, 0, NULL, 0, 0, &g_recorder) != PJ_SUCCESS) return -2;
     route_audio();
     return 0;
+}
+
+int pv_ec_selftest(char *algo, int algo_len) {
+    if (!g_started) return -1;
+    ensure_thread();
+    /* Same settings pjsua uses on the sound port: 20 ms mono frames. */
+    const unsigned rate = PV_SND_RATE, spf = rate / 50;
+    pj_pool_t *pool = pjsua_pool_create("ectest", 4000, 4000);
+    if (!pool) return -2;
+    pjmedia_echo_state *ec = NULL;
+    int rc = 0;
+    if (pjmedia_echo_create2(pool, rate, 1, spf, PV_EC_TAIL_MS, 0, PV_EC_OPTIONS, &ec) != PJ_SUCCESS) {
+        rc = -3;
+    } else {
+        pj_int16_t *play = pj_pool_calloc(pool, spf, sizeof(pj_int16_t));
+        pj_int16_t *rec = pj_pool_calloc(pool, spf, sizeof(pj_int16_t));
+        /* Two seconds of a tone and its echo: enough frames to reach the
+         * band processing that aborted before. */
+        for (unsigned f = 0; f < 100 && rc == 0; f++) {
+            for (unsigned i = 0; i < spf; i++) {
+                play[i] = (pj_int16_t)(((f * spf + i) * 440 * 2 / rate) % 2 ? 4000 : -4000);
+                rec[i] = (pj_int16_t)(play[i] / 4);
+            }
+            if (pjmedia_echo_cancel(ec, rec, play, 0, NULL) != PJ_SUCCESS) rc = -4;
+        }
+        pjmedia_echo_destroy(ec);
+    }
+    pj_pool_release(pool);
+    if (algo && algo_len > 0) {
+        snprintf(algo, (size_t)algo_len, "%s @ %u Hz", PV_EC_ALGO == PJMEDIA_ECHO_WEBRTC ? "WebRTC AEC (legacy)" : "WebRTC AEC3", rate);
+    }
+    return rc;
 }

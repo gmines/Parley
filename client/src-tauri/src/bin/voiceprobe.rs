@@ -7,6 +7,8 @@
 //!
 //!   voiceprobe --creds '<join response "sip" JSON>' --identity <user id> \
 //!              --play in.wav --record out.wav --seconds 10
+//!   voiceprobe --ec-selftest     (runs the echo canceller the app uses)
+//!   voiceprobe --list-devices
 
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
@@ -24,6 +26,22 @@ fn arg(name: &str) -> Option<String> {
 }
 
 fn main() {
+    // Run the echo canceller at the app's settings on synthetic audio. A null
+    // sound device skips echo cancellation entirely, so call tests can't
+    // catch problems in it.
+    if std::env::args().any(|a| a == "--ec-selftest") {
+        let engine = Engine::start(true, 1, |_| {}).expect("start engine");
+        let result = engine.ec_selftest();
+        engine.shutdown();
+        match result {
+            Ok(algo) => println!("echo canceller ok: {algo}"),
+            Err(e) => {
+                eprintln!("echo canceller failed: {e}");
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
     // List the sound devices the engine sees (real audio backend), then exit.
     if std::env::args().any(|a| a == "--list-devices") {
         let engine = Engine::start(false, 1, |_| {}).expect("start engine");

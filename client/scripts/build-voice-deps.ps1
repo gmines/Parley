@@ -64,6 +64,7 @@ tar -xzf "$Work\pj.tgz" -C "$Work\pj" --strip-components=1
 #define PJMEDIA_HAS_ILBC_CODEC       0
 #define PJMEDIA_HAS_G7221_CODEC      0
 #define PJMEDIA_HAS_WEBRTC_AEC       1
+#define PJMEDIA_HAS_WEBRTC_AEC3      1
 #define PJSUA_DEFAULT_CLOCK_RATE     48000
 #define PJSUA_DEFAULT_AUDIO_FRAME_PTIME 20
 #define PJMEDIA_SND_DEFAULT_REC_LATENCY  60
@@ -75,15 +76,30 @@ tar -xzf "$Work\pj.tgz" -C "$Work\pj" --strip-components=1
 # The Visual Studio projects compile opus.c but don't know where Opus's
 # headers are; cl.exe also reads extra options from the CL variable.
 $env:CL = "/I`"$Prefix\include`""
+# Echo cancellation is WebRTC AEC3 (see parley_voice.c). Its library isn't
+# part of the solution, and pjmedia only compiles the AEC3 wrapper as C++17
+# in Debug|Win32: make that unconditional.
+$pjmedia = "$Work\pj\pjmedia\build\pjmedia.vcxproj"
+$proj = Get-Content -Raw $pjmedia
+$fixed = $proj -replace '<LanguageStandard Condition="[^"]*">stdcpp17</LanguageStandard>', '<LanguageStandard>stdcpp17</LanguageStandard>'
+if ($fixed -eq $proj) { throw "pjmedia.vcxproj: AEC3 C++17 setting not found" }
+Set-Content -NoNewline -Encoding utf8 $pjmedia $fixed
 msbuild "$Work\pj\pjproject-vs14.sln" /t:libpjproject /m /nologo /verbosity:minimal `
     /p:Configuration=Release-Dynamic /p:Platform=x64 `
     /p:PlatformToolset=v143 /p:WindowsTargetPlatformVersion=10.0
 if ($LASTEXITCODE) { throw "pjproject build failed" }
+msbuild "$Work\pj\third_party\build\webrtc_aec3\libwebrtc_aec3.vcxproj" /m /nologo /verbosity:minimal `
+    /p:Configuration=Release-Dynamic /p:Platform=x64 `
+    /p:PlatformToolset=v143 /p:WindowsTargetPlatformVersion=10.0
+if ($LASTEXITCODE) { throw "webrtc AEC3 build failed" }
 Remove-Item Env:\CL
 
 $lib = Get-ChildItem -Path "$Work\pj\lib" -Filter "libpjproject-*Release-Dynamic.lib" | Select-Object -First 1
 if (-not $lib) { throw "libpjproject library not found" }
 Copy-Item $lib.FullName "$Prefix\lib\pjproject.lib"
+$aec3 = Get-ChildItem -Path "$Work\pj\third_party\lib" -Filter "libwebrtc_aec3-*Release-Dynamic.lib" | Select-Object -First 1
+if (-not $aec3) { throw "webrtc AEC3 library not found" }
+Copy-Item $aec3.FullName "$Prefix\lib\webrtc_aec3.lib"
 foreach ($dir in "pjlib", "pjlib-util", "pjnath", "pjmedia", "pjsip") {
     Copy-Item -Recurse -Force "$Work\pj\$dir\include\*" "$Prefix\include\"
 }

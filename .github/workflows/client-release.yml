@@ -136,6 +136,16 @@ jobs:
       - name: Install npm dependencies
         working-directory: client
         run: npm ci
+      # Runs the echo canceller with the app's settings. Call tests use no
+      # sound device, which skips echo cancellation, so check it here on
+      # each platform's own build.
+      - name: Echo canceller self-test
+        working-directory: client
+        shell: bash
+        run: |
+          npm run build
+          cd src-tauri
+          cargo run --features voiceprobe --bin voiceprobe -- --ec-selftest
 
       - uses: tauri-apps/tauri-action@v1.0.0
         env:

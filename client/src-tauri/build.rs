@@ -108,7 +108,8 @@ fn build_voice() {
 }
 
 /// Windows: build-voice-deps.ps1 produces one combined pjproject.lib (MSBuild
-/// has no pkg-config file), plus opus.lib.
+/// has no pkg-config file), plus opus.lib and webrtc_aec3.lib (the echo
+/// canceller, built outside the solution).
 fn link_voice_windows(prefix: &Path) {
     cc::Build::new()
         .file("voice/parley_voice.c")
@@ -117,7 +118,7 @@ fn link_voice_windows(prefix: &Path) {
         .warnings(false)
         .compile("parley_voice");
     println!("cargo:rustc-link-search=native={}", prefix.join("lib").display());
-    for lib in ["pjproject", "opus"] {
+    for lib in ["pjproject", "webrtc_aec3", "opus"] {
         println!("cargo:rustc-link-lib=static={lib}");
     }
     // Sockets, audio (WMME / DirectSound / WASAPI), COM, IP helper.

@@ -84,6 +84,11 @@ int pv_set_devices(int capture, int playback);
 int pv_test_play(const char *wav_path);
 int pv_test_record(const char *wav_path);
 
+/* Runs the echo canceller pjsua uses, with the same rate and options, over a
+ * couple of seconds of synthetic audio (a sound device never needs to open).
+ * Writes the algorithm and rate to `algo`. 0 = ok. Needs pv_init. */
+int pv_ec_selftest(char *algo, int algo_len);
+
 #ifdef __cplusplus
 }
 #endif

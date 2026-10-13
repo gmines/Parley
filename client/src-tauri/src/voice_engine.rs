@@ -64,6 +64,7 @@ extern "C" {
     fn pv_set_devices(capture: c_int, playback: c_int) -> c_int;
     fn pv_test_play(path: *const c_char) -> c_int;
     fn pv_test_record(path: *const c_char) -> c_int;
+    fn pv_ec_selftest(algo: *mut c_char, algo_len: c_int) -> c_int;
 }
 
 /// Credentials from voice-control's join endpoint.
@@ -249,6 +250,17 @@ impl Engine {
     pub fn test_record(&self, path: &str) -> Result<(), String> {
         let p = CString::new(path).map_err(|e| e.to_string())?;
         if unsafe { pv_test_record(p.as_ptr()) } == 0 { Ok(()) } else { Err("couldn't create WAV file".into()) }
+    }
+
+    /// Runs the call's echo canceller over synthetic audio; returns its name
+    /// and rate. A bad configuration aborts the process here instead of in
+    /// the first real call.
+    pub fn ec_selftest(&self) -> Result<String, String> {
+        let mut algo = [0 as c_char; 64];
+        match unsafe { pv_ec_selftest(algo.as_mut_ptr(), algo.len() as c_int) } {
+            0 => Ok(unsafe { CStr::from_ptr(algo.as_ptr()) }.to_string_lossy().into_owned()),
+            rc => Err(format!("code {rc}")),
+        }
     }
 
     /// Stops the SIP stack. Only for process exit.

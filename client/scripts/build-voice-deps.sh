@@ -90,8 +90,11 @@ cat > "$WORK/pj/pjlib/include/pj/config_site.h" <<'CFG'
 #define PJSUA_DEFAULT_AUDIO_FRAME_PTIME 20
 #define PJMEDIA_SND_DEFAULT_REC_LATENCY  60
 #define PJMEDIA_SND_DEFAULT_PLAY_LATENCY 60
-/* Echo cancellation: WebRTC AEC (bundled with pjproject, not the WebRTC protocol). */
+/* Echo cancellation: WebRTC AEC3 (bundled with pjproject, not the WebRTC
+ * protocol). The legacy AEC is kept as a fallback, but pjmedia drives it with
+ * one band only, so it aborts above 16 kHz (see parley_voice.c). */
 #define PJMEDIA_HAS_WEBRTC_AEC       1
+#define PJMEDIA_HAS_WEBRTC_AEC3      1
 /* The Speex codec is disabled, and its echo canceller lives in the same
  * library: turn it off too (we use the WebRTC AEC). */
 #define PJMEDIA_HAS_SPEEX_AEC        0
@@ -102,9 +105,11 @@ CFG
    --disable-video --disable-sdl --disable-ffmpeg --disable-v4l2 --disable-openh264 \
    --disable-libyuv --disable-vpx --disable-bcg729 \
    --disable-speex-codec --disable-gsm-codec --disable-ilbc-codec --disable-g7221-codec \
-   --with-opus="$PREFIX" > "$WORK/pj-configure.log" 2>&1 \
+   --enable-libwebrtc-aec3 --with-opus="$PREFIX" > "$WORK/pj-configure.log" 2>&1 \
  && make dep > /dev/null 2>&1 && make -j"$JOBS" > "$WORK/pj-make.log" 2>&1 && make install > /dev/null)
 
-grep -E 'Using SSL|opus|alsa|ALSA|Checking sound' "$WORK/pj-configure.log" | sed 's/^/   /' || true
+grep -E 'Using SSL|opus|alsa|ALSA|Checking sound|AEC3' "$WORK/pj-configure.log" | sed 's/^/   /' || true
+# The shim relies on AEC3 being in the library (config_site.h says it is).
+grep -q 'webrtc-aec3' "$PREFIX/lib/pkgconfig/libpjproject.pc" || { echo "pjproject was built without WebRTC AEC3" >&2; exit 1; }
 echo "$WANT" > "$STAMP"
 echo "voice deps installed in $PREFIX"
