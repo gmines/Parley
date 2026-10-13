@@ -6,8 +6,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates
     && curl -fsSL https://deb.kamailio.org/kamailiodebkey.gpg | gpg --dearmor -o /usr/share/keyrings/kamailio.gpg \
     && echo "deb [signed-by=/usr/share/keyrings/kamailio.gpg] https://deb.kamailio.org/kamailio${KAMAILIO_SERIES} bookworm main" \
          > /etc/apt/sources.list.d/kamailio.list \
-    && apt-get update && apt-get install -y --no-install-recommends kamailio kamailio-extra-modules kamailio-autheph-modules gettext-base netbase \
-    && apt-get purge -y gnupg curl && apt-get autoremove -y && rm -rf /var/lib/apt/lists/*
+    && apt-get update && apt-get install -y --no-install-recommends kamailio kamailio-extra-modules kamailio-autheph-modules gettext-base netbase libcap2-bin \
+    # Port 5060 as a non-root user on the host's network (Kubernetes
+    # hostNetwork, rootful containers): give the binary just that capability.
+    && setcap cap_net_bind_service=+ep /usr/sbin/kamailio \
+    && apt-get purge -y gnupg curl libcap2-bin && apt-get autoremove -y && rm -rf /var/lib/apt/lists/*
 COPY kamailio.cfg.tmpl /etc/kamailio/kamailio.cfg.tmpl
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 USER kamailio

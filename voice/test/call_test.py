@@ -86,8 +86,11 @@ def pjsua(name, workdir, creds, local_port, rtp_port, play, rec, target, seconds
     args.append(target)
     quoted = " ".join("'" + a.replace("'", "'\\''") + "'" for a in args)
     script = f"(sleep {seconds}; echo h; sleep 1; echo q) | pjsua {quoted} > /work/{name}.log 2>&1"
-    return subprocess.Popen(["podman", "run", "--rm", "--network", "host", "-v", f"{workdir}:/work:Z",
+    return subprocess.Popen(["podman", "run", "--rm", "--network", PJSUA_NETWORK, "-v", f"{workdir}:/work:Z",
                              "--entrypoint", "sh", "parley/pjsua:dev", "-c", script])
+
+
+PJSUA_NETWORK = "host"
 
 
 def main():
@@ -95,11 +98,17 @@ def main():
     ap.add_argument("--host", default="192.168.19.45")
     ap.add_argument("--db", default="postgres://postgres:parley@localhost:55432/parley?sslmode=disable")
     ap.add_argument("--group", action="store_true", help="3-person group call instead of a DM (exercises the conference mixer)")
+    ap.add_argument("--api", help="api base URL (default http://<host>:18080)")
+    ap.add_argument("--voice", help="voice-control base URL (default http://<host>:18082)")
+    ap.add_argument("--pjsua-network", default="host",
+                    help="podman network for the SIP clients, e.g. 'kind' to call into a kind cluster's node")
     ap.add_argument("--app", metavar="VOICEPROBE", help="use the desktop app's voice engine (path to the voiceprobe binary) for alice instead of pjsua")
     opt = ap.parse_args()
+    global PJSUA_NETWORK
+    PJSUA_NETWORK = opt.pjsua_network
     if opt.group:
         return group_call(opt)
-    api, voice = f"http://{opt.host}:18080", f"http://{opt.host}:18082"
+    api, voice = opt.api or f"http://{opt.host}:18080", opt.voice or f"http://{opt.host}:18082"
     ok = True
 
     def check(cond, msg):
@@ -207,7 +216,7 @@ def main():
 def group_call(opt):
     """Three people in a group call: FreeSWITCH's conference must decode, mix
     and re-encode everyone's Opus. Each must hear both others."""
-    api, voice = f"http://{opt.host}:18080", f"http://{opt.host}:18082"
+    api, voice = opt.api or f"http://{opt.host}:18080", opt.voice or f"http://{opt.host}:18082"
     ok = True
 
     def check(cond, msg):

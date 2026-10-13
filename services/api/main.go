@@ -4,7 +4,7 @@
 //
 //	PARLEY_DATABASE_URL   Postgres URL (required)
 //	PARLEY_SIGNING_KEY    base64 32-byte Ed25519 seed for access tokens (required;
-//	                      generate with `openssl rand -base64 32`)
+//	                      `api keygen` prints a new one with its PARLEY_VERIFY_KEY)
 //	PARLEY_LISTEN_ADDR    default ":8080"
 //	PARLEY_ACCESS_TTL     default "15m"
 //	PARLEY_REFRESH_TTL    default "720h"
@@ -23,6 +23,8 @@ package main
 import (
 	"context"
 	"crypto/ed25519"
+	"crypto/rand"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -48,6 +50,17 @@ import (
 )
 
 func main() {
+	// `api keygen`: a new access-token key pair, for deployment secrets.
+	if len(os.Args) == 2 && os.Args[1] == "keygen" {
+		pub, priv, err := ed25519.GenerateKey(rand.Reader)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		fmt.Printf("PARLEY_SIGNING_KEY=%s\nPARLEY_VERIFY_KEY=%s\n",
+			base64.StdEncoding.EncodeToString(priv.Seed()), auth.EncodePublicKey(pub))
+		return
+	}
 	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, nil)))
 	if err := run(); err != nil {
 		slog.Error("api exited", "err", err)

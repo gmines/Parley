@@ -1,0 +1,60 @@
+{{- if .Values.nats.enabled }}
+{{- $name := printf "%s-nats" (include "parley.name" .) }}
+{{- /* Core NATS only: events are fanned out live and nothing is stored, so a
+       single pod with no volume is enough (clients resync after reconnecting). */}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "parley.labels" . | nindent 4 }}
+    {{- include "parley.selector" (list . "nats") | nindent 4 }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "parley.selector" (list . "nats") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "parley.labels" . | nindent 8 }}
+        {{- include "parley.selector" (list . "nats") | nindent 8 }}
+    spec:
+      securityContext:
+        {{- include "parley.podSecurity" . | nindent 8 }}
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+      containers:
+        - name: nats
+          image: {{ .Values.nats.image }}
+          args: ["--port", "4222", "--http_port", "8222"]
+          ports:
+            - { name: client, containerPort: 4222 }
+            - { name: monitor, containerPort: 8222 }
+          readinessProbe:
+            httpGet: { path: /healthz, port: monitor }
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: { path: /healthz, port: monitor }
+            periodSeconds: 30
+          resources:
+            {{- toYaml .Values.nats.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "parley.labels" . | nindent 4 }}
+spec:
+  selector:
+    {{- include "parley.selector" (list . "nats") | nindent 4 }}
+  ports:
+    - { name: client, port: 4222, targetPort: client }
+{{- end }}

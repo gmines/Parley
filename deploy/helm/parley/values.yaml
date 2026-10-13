@@ -1,0 +1,135 @@
+# Parley server. See README.md in this directory for a home lab walkthrough.
+
+# Hostname clients connect to (the "server" field in the app). Required.
+host: ""
+
+image:
+  # Images are <registry>/parley-<component>:<tag>.
+  registry: ghcr.io/gmines
+  # Defaults to the chart's appVersion. Use "development" to follow the
+  # development branch (with pullPolicy: Always).
+  tag: ""
+  pullPolicy: IfNotPresent
+imagePullSecrets: []
+
+ingress:
+  enabled: true
+  # Empty = the cluster's default class (Traefik on k3s).
+  className: ""
+  # e.g. cert-manager.io/cluster-issuer: letsencrypt
+  annotations: {}
+  tls:
+    # false = plain http/ws (LAN testing only: tokens travel unencrypted).
+    enabled: true
+    # Certificate Secret for `host` (cert-manager fills it in when the
+    # annotation above is set). Default: <release>-tls.
+    secretName: ""
+
+# Secrets. Either name an existing Secret, or let the chart create one.
+secrets:
+  # Existing Secret with keys: signing-key, verify-key, sip-secret, esl-password
+  # (and database-url when postgres.enabled=false and no externalDatabase secret).
+  existingSecret: ""
+  # Access-token key pair (required unless existingSecret is set). Generate with:
+  #   podman run --rm ghcr.io/gmines/parley-api keygen
+  signingKey: ""
+  verifyKey: ""
+  # Shared by voice-control and Kamailio; generated (and kept across upgrades) if empty.
+  sipSecret: ""
+  # FreeSWITCH Event Socket password; generated if empty. Letters, digits, '_' and '-' only.
+  eslPassword: ""
+
+api:
+  replicas: 2
+  accessTTL: 15m
+  refreshTTL: 720h
+  # Proxies whose X-Forwarded-For is trusted (login lockout is per client IP).
+  # Default: k3s's pod network, where Traefik runs.
+  trustedProxies: "10.42.0.0/16"
+  # Extra environment, e.g. account recovery (see services/api/config.go):
+  #   PARLEY_RECOVERY_EMAIL: smtp
+  #   PARLEY_SMTP_HOST: smtp.example.org
+  extraEnv: {}
+  resources:
+    requests: { cpu: 50m, memory: 64Mi }
+    limits: { memory: 256Mi }
+
+realtime:
+  replicas: 2
+  resources:
+    requests: { cpu: 50m, memory: 64Mi }
+    limits: { memory: 256Mi }
+
+voice:
+  enabled: true
+  # The voice pod uses the node's network directly (SIP and audio need a
+  # stable, reachable address), so it runs on one chosen node. Label it:
+  #   kubectl label node <node> parley.chat/media=true
+  nodeSelector:
+    parley.chat/media: "true"
+  tolerations: []
+  # Address clients send SIP and audio to: the media node's LAN IP, or your
+  # public IP when the router forwards SIP (TCP 5060) and the audio ports
+  # below to that node. Empty = the node's own IP.
+  advertiseAddress: ""
+  # UDP ports for audio (two per caller), opened on the media node.
+  rtpPortStart: 10000
+  rtpPortEnd: 10999
+  # How long call credentials from voice-control stay valid.
+  credentialTTL: 5m
+  control:
+    resources:
+      requests: { cpu: 20m, memory: 32Mi }
+      limits: { memory: 128Mi }
+  kamailio:
+    resources:
+      requests: { cpu: 50m, memory: 64Mi }
+      limits: { memory: 256Mi }
+  freeswitch:
+    # Mixing audio is the CPU-heavy part: roughly 1 core per ~100 callers.
+    resources:
+      requests: { cpu: 250m, memory: 256Mi }
+      limits: { memory: 1Gi }
+
+# Bundled Postgres (one instance, persistent volume).
+postgres:
+  enabled: true
+  image: docker.io/library/postgres:17-alpine
+  database: parley
+  username: parley
+  # Generated (and kept across upgrades) if empty.
+  password: ""
+  storage:
+    size: 5Gi
+    # Empty = the cluster default (local-path on k3s).
+    storageClass: ""
+  resources:
+    requests: { cpu: 50m, memory: 128Mi }
+    limits: { memory: 512Mi }
+  # Nightly pg_dump to its own volume, keeping the newest `keep` dumps.
+  backup:
+    enabled: false
+    schedule: "0 3 * * *"
+    keep: 7
+    storage:
+      size: 5Gi
+      storageClass: ""
+
+# Your own Postgres, when postgres.enabled=false. Parley needs one database
+# it owns (it creates its tables on startup).
+externalDatabase:
+  # Secret holding the URL, e.g. postgres://parley:pw@db.lan:5432/parley?sslmode=require
+  existingSecret: ""
+  existingSecretKey: url
+
+# Bundled NATS (event fan-out between services; nothing is stored).
+nats:
+  enabled: true
+  image: docker.io/library/nats:2.11-alpine
+  resources:
+    requests: { cpu: 20m, memory: 32Mi }
+    limits: { memory: 128Mi }
+
+# Your own NATS, when nats.enabled=false.
+externalNats:
+  url: ""

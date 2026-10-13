@@ -1,0 +1,22 @@
+Parley is deployed.
+
+App server address: {{ include "parley.httpScheme" . }}://{{ .Values.host }}
+{{- if not .Values.ingress.tls.enabled }}
+  (plain http: logins and tokens travel unencrypted; LAN testing only)
+{{- end }}
+{{- if .Values.voice.enabled }}
+
+Voice runs on the node labelled {{ toJson .Values.voice.nodeSelector }}.
+If the voice pod stays Pending, label your media node:
+  kubectl label node <node> parley.chat/media=true
+
+Clients must reach {{ .Values.voice.advertiseAddress | default "that node's IP" }} on:
+  TCP 5060                                   SIP (call setup)
+  UDP {{ .Values.voice.rtpPortStart }}-{{ .Values.voice.rtpPortEnd }}                         audio
+Open these in the node's firewall (and forward them on your router for
+callers outside your network).
+{{- end }}
+
+Check it:
+  kubectl -n {{ .Release.Namespace }} get pods -l app.kubernetes.io/instance={{ .Release.Name }}
+  curl {{ include "parley.httpScheme" . }}://{{ .Values.host }}/v1/meta

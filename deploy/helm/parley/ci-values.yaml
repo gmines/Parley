@@ -1,0 +1,10 @@
+# Values for CI's lint/render (not a real deployment).
+host: chat.example.org
+secrets:
+  signingKey: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+  verifyKey: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+voice:
+  advertiseAddress: 203.0.113.10
+postgres:
+  backup:
+    enabled: true

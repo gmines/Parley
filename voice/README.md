@@ -74,6 +74,12 @@ python3 voice/test/call_test.py --host 192.168.19.45 --group  # 3 people, mixed 
 # The desktop app's own voice engine as one participant:
 (cd client/src-tauri && cargo build --features voiceprobe --bin voiceprobe)
 python3 voice/test/call_test.py --host 192.168.19.45 --app client/src-tauri/target/debug/voiceprobe
+
+# A Helm deployment in a local kind cluster (rootless podman): SIP clients join
+# the "kind" network to reach the media node; HTTP goes through the ingress
+# (e.g. kubectl -n traefik port-forward svc/traefik 28000:80, host=localhost).
+python3 voice/test/call_test.py --host <kind node IP> --pjsua-network kind \
+  --api http://localhost:28000 --voice http://localhost:28000 --db <postgres URL>
 ```
 
 ## Not done yet

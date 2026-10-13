@@ -1,0 +1,10 @@
+apiVersion: v2
+name: parley
+description: Parley chat and voice server (api, realtime, voice with Kamailio + FreeSWITCH, Postgres, NATS)
+type: application
+version: 0.1.0
+# Image tag used when image.tag is empty (server-v<appVersion> builds it).
+appVersion: "0.1.0"
+home: https://github.com/gmines/Parley
+sources:
+  - https://github.com/gmines/Parley

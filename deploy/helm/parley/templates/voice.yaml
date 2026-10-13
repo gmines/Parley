@@ -1,0 +1,173 @@
+{{- if .Values.voice.enabled }}
+{{- $name := printf "%s-voice" (include "parley.name" .) }}
+{{- $secret := include "parley.secretName" . }}
+{{- /*
+  Kamailio (SIP edge), FreeSWITCH (audio mixing) and voice-control (rooms) in
+  one pod on the media node's own network:
+  - clients reach SIP on <advertise>:5060 and send audio straight to the
+    node's UDP ports, with no NAT or load balancer in between;
+  - Kamailio -> FreeSWITCH (127.0.0.1:5080) and voice-control -> FreeSWITCH
+    Event Socket (127.0.0.1:8021) stay on the node's loopback.
+  One replica: FreeSWITCH holds the calls and voice-control the room state.
+*/}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "parley.labels" . | nindent 4 }}
+    {{- include "parley.selector" (list . "voice") | nindent 4 }}
+spec:
+  replicas: 1
+  # Host ports can't be shared: stop the old pod before starting the new one.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "parley.selector" (list . "voice") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "parley.labels" . | nindent 8 }}
+        {{- include "parley.selector" (list . "voice") | nindent 8 }}
+      annotations:
+        # Restart on secret changes. Only what values supply: generated secrets
+        # never change once created.
+        checksum/secrets: {{ toJson (list .Values.secrets .Values.postgres.password) | sha256sum }}
+    spec:
+      hostNetwork: true
+      # Still resolve cluster services (Postgres, NATS) from the host network.
+      dnsPolicy: ClusterFirstWithHostNet
+      {{- with .Values.voice.nodeSelector }}
+      nodeSelector: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.voice.tolerations }}
+      tolerations: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- include "parley.podSecurity" . | nindent 8 }}
+      # Calls in progress end when the pod stops; let hangups go out.
+      terminationGracePeriodSeconds: 20
+      containers:
+        - name: freeswitch
+          image: {{ include "parley.image" (list . "freeswitch") }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          env:
+            - name: NODE_IP
+              valueFrom: { fieldRef: { fieldPath: status.hostIP } }
+            - name: PARLEY_MEDIA_IP
+              {{- if .Values.voice.advertiseAddress }}
+              value: {{ .Values.voice.advertiseAddress | quote }}
+              {{- else }}
+              valueFrom: { fieldRef: { fieldPath: status.hostIP } }
+              {{- end }}
+            # Bind audio on the node's own address (the advertised one may be
+            # a router's public IP forwarding to it).
+            - name: PARLEY_RTP_IP
+              value: "$(NODE_IP)"
+            - name: PARLEY_RTP_START
+              value: {{ .Values.voice.rtpPortStart | quote }}
+            - name: PARLEY_RTP_END
+              value: {{ .Values.voice.rtpPortEnd | quote }}
+            - name: PARLEY_ESL_PASSWORD
+              valueFrom:
+                secretKeyRef: { name: {{ $secret }}, key: esl-password }
+          resources:
+            {{- toYaml .Values.voice.freeswitch.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+        - name: kamailio
+          image: {{ include "parley.image" (list . "kamailio") }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          env:
+            - name: PARLEY_SIP_ADVERTISE
+              {{- if .Values.voice.advertiseAddress }}
+              value: {{ .Values.voice.advertiseAddress | quote }}
+              {{- else }}
+              valueFrom: { fieldRef: { fieldPath: status.hostIP } }
+              {{- end }}
+            - name: PARLEY_SIP_SECRET
+              valueFrom:
+                secretKeyRef: { name: {{ $secret }}, key: sip-secret }
+          ports:
+            - { name: sip-tcp, containerPort: 5060, protocol: TCP }
+            - { name: sip-udp, containerPort: 5060, protocol: UDP }
+          readinessProbe:
+            tcpSocket: { port: 5060 }
+            periodSeconds: 10
+          resources:
+            {{- toYaml .Values.voice.kamailio.resources | nindent 12 }}
+          securityContext:
+            # The image grants the kamailio binary CAP_NET_BIND_SERVICE (port
+            # 5060 as a non-root user); file capabilities need privilege
+            # escalation allowed and the capability in the bounding set.
+            allowPrivilegeEscalation: true
+            capabilities:
+              drop: ["ALL"]
+              add: ["NET_BIND_SERVICE"]
+        - name: control
+          image: {{ include "parley.image" (list . "voice-control") }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          env:
+            - name: NODE_IP
+              valueFrom: { fieldRef: { fieldPath: status.hostIP } }
+            - name: SIP_HOST
+              {{- if .Values.voice.advertiseAddress }}
+              value: {{ .Values.voice.advertiseAddress | quote }}
+              {{- else }}
+              valueFrom: { fieldRef: { fieldPath: status.hostIP } }
+              {{- end }}
+            # Only on the node's address; clients come in through the ingress.
+            - name: PARLEY_LISTEN_ADDR
+              value: "$(NODE_IP):8082"
+            - name: PARLEY_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  {{- include "parley.databaseUrlRef" . | nindent 18 }}
+            - name: PARLEY_NATS_URL
+              value: {{ include "parley.natsUrl" . | quote }}
+            - name: PARLEY_VERIFY_KEY
+              valueFrom:
+                secretKeyRef: { name: {{ $secret }}, key: verify-key }
+            - name: PARLEY_ESL_ADDR
+              value: "127.0.0.1:8021"
+            - name: PARLEY_ESL_PASSWORD
+              valueFrom:
+                secretKeyRef: { name: {{ $secret }}, key: esl-password }
+            - name: PARLEY_SIP_SECRET
+              valueFrom:
+                secretKeyRef: { name: {{ $secret }}, key: sip-secret }
+            - name: PARLEY_SIP_PROXY
+              value: "sip:$(SIP_HOST):5060;transport=tcp"
+            - name: PARLEY_SIP_CRED_TTL
+              value: {{ .Values.voice.credentialTTL | quote }}
+          ports:
+            - { name: http, containerPort: 8082 }
+          readinessProbe:
+            httpGet: { path: /healthz, port: http }
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: { path: /healthz, port: http }
+            periodSeconds: 20
+          resources:
+            {{- toYaml .Values.voice.control.resources | nindent 12 }}
+          securityContext:
+            {{- include "parley.containerSecurity" . | nindent 12 }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "parley.labels" . | nindent 4 }}
+spec:
+  selector:
+    {{- include "parley.selector" (list . "voice") | nindent 4 }}
+  ports:
+    - { name: http, port: 8082, targetPort: 8082 }
+{{- end }}
