@@ -175,3 +175,12 @@ jobs:
             These builds are not code-signed yet. Windows SmartScreen may say "Windows protected your PC": click **More info → Run anyway**. On macOS, if it says the app "is damaged" or "can't be opened", run `xattr -dr com.apple.quarantine /Applications/Parley.app` in Terminal, or right-click the app → **Open**.
           releaseDraft: false
           prerelease: true
+
+      # macOS remembers keychain and microphone permissions per code
+      # signature; an unsigned app gets asked again on every access.
+      - name: Check the macOS app is signed
+        if: runner.os == 'macOS'
+        run: |
+          app=client/src-tauri/target/universal-apple-darwin/release/bundle/macos/Parley.app
+          codesign --verify --deep --strict --verbose=2 "$app"
+          codesign -d --entitlements - "$app" 2>&1 | grep -q com.apple.security.device.audio-input

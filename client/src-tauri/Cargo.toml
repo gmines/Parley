@@ -1,6 +1,6 @@
 [package]
 name = "parley-client"
-version = "0.3.2"
+version = "0.3.3"
 description = "Parley desktop client: text and voice chat"
 authors = ["Parley contributors"]
 license = "GPL-2.0-only"
