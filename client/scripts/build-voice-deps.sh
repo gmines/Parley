@@ -123,7 +123,17 @@ SSL_FLAG=()
    --disable-libyuv --disable-vpx --disable-bcg729 \
    --disable-speex-codec --disable-gsm-codec --disable-ilbc-codec --disable-g7221-codec \
    --enable-libwebrtc-aec3 --with-opus="$PREFIX" > "$WORK/pj-configure.log" 2>&1 \
- && make dep > /dev/null 2>&1 && make -j"$JOBS" > "$WORK/pj-make.log" 2>&1 && make install > /dev/null)
+ && make dep > "$WORK/pj-dep.log" 2>&1 && make -j"$JOBS" > "$WORK/pj-make.log" 2>&1 && make install > /dev/null) || {
+  # Show why (CI keeps no build directory).
+  for log in pj-make.log pj-dep.log pj-configure.log; do
+    [[ -s "$WORK/$log" ]] || continue
+    echo "pjproject build failed; end of $log:" >&2
+    grep -nE 'error|Error' "$WORK/$log" | head -n 20 >&2 || true
+    tail -n 30 "$WORK/$log" >&2
+    break
+  done
+  exit 1
+}
 
 grep -E 'SSL|opus|alsa|ALSA|Checking sound|AEC3' "$WORK/pj-configure.log" | sed 's/^/   /' || true
 # The shim needs TLS (config_site.h says it's there): make sure configure

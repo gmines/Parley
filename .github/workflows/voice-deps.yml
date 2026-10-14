@@ -55,6 +55,7 @@ jobs:
             client/.deps/*/src/*.log
             client/.deps/*/src/pj/config.log
           if-no-files-found: ignore
+          include-hidden-files: true # client/.deps
 
       - uses: dtolnay/rust-toolchain@stable
         with:
