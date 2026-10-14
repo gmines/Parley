@@ -113,12 +113,18 @@ cat > "$WORK/pj/pjlib/include/pj/config_site.h" <<'CFG'
 #define PJSIP_TLS_TRANSPORT_DONT_CREATE_LISTENER 1
 #define PJSUA_MAX_ACC                4
 CFG
-# TLS: on macOS, configure finds Secure Transport by itself; --disable-ssl
-# only stops it from also picking up a Homebrew OpenSSL (a dylib the app
-# would then depend on). On Linux it finds the system OpenSSL.
+# TLS: on Linux, configure finds the system OpenSSL. On macOS, config_site.h
+# picks Secure Transport, and its framework is linked here: configure's own
+# check for it compiles with -Werror and fails on the API's deprecation
+# warning. --disable-ssl stops it from picking up a Homebrew OpenSSL instead
+# (a dylib the app would then depend on).
 SSL_FLAG=()
-[[ "$OS" == darwin ]] && SSL_FLAG=(--disable-ssl)
-(cd "$WORK/pj" && ./configure ${HOST_FLAG[@]+"${HOST_FLAG[@]}"} --prefix="$PREFIX" --disable-shared ${SSL_FLAG[@]+"${SSL_FLAG[@]}"} \
+PJ_LIBS="${LIBS:-}"
+if [[ "$OS" == darwin ]]; then
+  SSL_FLAG=(--disable-ssl)
+  PJ_LIBS="$PJ_LIBS -framework Security"
+fi
+(cd "$WORK/pj" && LIBS="$PJ_LIBS" ./configure ${HOST_FLAG[@]+"${HOST_FLAG[@]}"} --prefix="$PREFIX" --disable-shared ${SSL_FLAG[@]+"${SSL_FLAG[@]}"} \
    --disable-video --disable-sdl --disable-ffmpeg --disable-v4l2 --disable-openh264 \
    --disable-libyuv --disable-vpx --disable-bcg729 \
    --disable-speex-codec --disable-gsm-codec --disable-ilbc-codec --disable-g7221-codec \
@@ -136,11 +142,10 @@ SSL_FLAG=()
 }
 
 grep -E 'SSL|opus|alsa|ALSA|Checking sound|AEC3' "$WORK/pj-configure.log" | sed 's/^/   /' || true
-# The shim needs TLS (config_site.h says it's there): make sure configure
-# found the library to link it with.
-if [[ "$OS" == darwin ]]; then
-  grep -q 'Darwin SSL is available... yes' "$WORK/pj-configure.log" || { echo "pjproject: Secure Transport not found" >&2; exit 1; }
-else
+# The shim needs TLS (config_site.h says it's there): on Linux, make sure
+# configure found OpenSSL to link it with. (voiceprobe --selftest checks
+# TLS works on every platform.)
+if [[ "$OS" == linux ]]; then
   grep -q 'OpenSSL library found' "$WORK/pj-configure.log" || { echo "pjproject: OpenSSL not found (install libssl-dev / openssl-devel)" >&2; exit 1; }
 fi
 # The shim relies on AEC3 being in the library (config_site.h says it is).
