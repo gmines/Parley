@@ -47,7 +47,7 @@ jobs:
       - name: Linux build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev libdbus-1-dev libasound2-dev patchelf
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev libdbus-1-dev libasound2-dev libssl-dev patchelf
       - name: Cache voice libraries
         uses: actions/cache@v6
         with:
@@ -96,7 +96,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev libdbus-1-dev libasound2-dev patchelf
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev libdbus-1-dev libasound2-dev libssl-dev patchelf
       - uses: microsoft/setup-msbuild@v3
         if: runner.os == 'Windows'
 
@@ -136,16 +136,16 @@ jobs:
       - name: Install npm dependencies
         working-directory: client
         run: npm ci
-      # Runs the echo canceller with the app's settings. Call tests use no
-      # sound device, which skips echo cancellation, so check it here on
-      # each platform's own build.
-      - name: Echo canceller self-test
+      # Runs the echo canceller with the app's settings (call tests use no
+      # sound device, which skips echo cancellation) and checks SIP over TLS
+      # is built in, on each platform's own build.
+      - name: Voice engine self-test (echo canceller, SIP over TLS)
         working-directory: client
         shell: bash
         run: |
           npm run build
           cd src-tauri
-          cargo run --features voiceprobe --bin voiceprobe -- --ec-selftest
+          cargo run --features voiceprobe --bin voiceprobe -- --selftest
 
       - uses: tauri-apps/tauri-action@v1.0.0
         env:

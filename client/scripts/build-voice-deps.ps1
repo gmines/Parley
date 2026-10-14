@@ -55,7 +55,9 @@ tar -xzf "$Work\pj.tgz" -C "$Work\pj" --strip-components=1
 /* Parley: audio-only SIP client (keep in sync with build-voice-deps.sh). */
 #define PJMEDIA_HAS_VIDEO            0
 #define PJMEDIA_HAS_SRTP             1
-#define PJ_HAS_SSL_SOCK              0
+/* SIP over TLS with Windows' own TLS (Schannel) and certificate store. */
+#define PJ_HAS_SSL_SOCK              1
+#define PJ_SSL_SOCK_IMP              PJ_SSL_SOCK_IMP_SCHANNEL
 #define PJMEDIA_HAS_OPUS_CODEC       1
 #define PJMEDIA_HAS_G722_CODEC       1
 #define PJMEDIA_HAS_SPEEX_CODEC      0
@@ -70,6 +72,8 @@ tar -xzf "$Work\pj.tgz" -C "$Work\pj" --strip-components=1
 #define PJMEDIA_SND_DEFAULT_REC_LATENCY  60
 #define PJMEDIA_SND_DEFAULT_PLAY_LATENCY 60
 #define PJSUA_MAX_CALLS              4
+/* Outbound-only TLS: no listening socket on the client. */
+#define PJSIP_TLS_TRANSPORT_DONT_CREATE_LISTENER 1
 #define PJSUA_MAX_ACC                4
 "@ | Set-Content -Encoding ascii "$Work\pj\pjlib\include\pj\config_site.h"
 

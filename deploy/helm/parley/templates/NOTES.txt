@@ -10,9 +10,14 @@ Voice runs on the node labelled {{ toJson .Values.voice.nodeSelector }}.
 If the voice pod stays Pending, label your media node:
   kubectl label node <node> parley.chat/media=true
 
-Clients must reach {{ .Values.voice.advertiseAddress | default "that node's IP" }} on:
-  TCP 5060                                   SIP (call setup)
-  UDP {{ .Values.voice.rtpPortStart }}-{{ .Values.voice.rtpPortEnd }}                         audio
+Clients must reach that node on:
+{{- if .Values.voice.sip.tls.enabled }}
+  TCP {{ .Values.voice.sip.tls.port }} at {{ .Values.host }}                SIP over TLS (call setup)
+{{- end }}
+{{- if .Values.voice.sip.plain.enabled }}
+  TCP+UDP 5060 at {{ .Values.voice.advertiseAddress | default "the node's IP" }}            plain SIP (clients before 0.4; unencrypted)
+{{- end }}
+  UDP {{ .Values.voice.rtpPortStart }}-{{ .Values.voice.rtpPortEnd }} at {{ .Values.voice.advertiseAddress | default "the node's IP" }}    audio (SRTP)
 Open these in the node's firewall (and forward them on your router for
 callers outside your network).
 {{- end }}

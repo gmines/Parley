@@ -121,8 +121,12 @@ fn link_voice_windows(prefix: &Path) {
     for lib in ["pjproject", "webrtc_aec3", "opus"] {
         println!("cargo:rustc-link-lib=static={lib}");
     }
-    // Sockets, audio (WMME / DirectSound / WASAPI), COM, IP helper.
-    for lib in ["ws2_32", "iphlpapi", "winmm", "dsound", "ole32", "oleaut32", "uuid", "advapi32", "user32", "ksuser"] {
+    // Sockets, audio (WMME / DirectSound / WASAPI), COM, IP helper, and
+    // Schannel (TLS) with the certificate store.
+    for lib in [
+        "ws2_32", "iphlpapi", "winmm", "dsound", "ole32", "oleaut32", "uuid", "advapi32", "user32", "ksuser",
+        "secur32", "crypt32", "bcrypt", "shlwapi",
+    ] {
         println!("cargo:rustc-link-lib=dylib={lib}");
     }
 }

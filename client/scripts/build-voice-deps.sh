@@ -11,7 +11,8 @@
 #                                                  (universal builds need arm64 + x86_64)
 # Windows: client/scripts/build-voice-deps.ps1
 #
-# Linux needs the ALSA headers (Fedora: alsa-lib-devel, Debian: libasound2-dev).
+# Linux needs the ALSA and OpenSSL headers (Fedora: alsa-lib-devel openssl-devel,
+# Debian: libasound2-dev libssl-dev).
 set -euo pipefail
 
 OPUS_VERSION=1.6.1
@@ -81,8 +82,17 @@ cat > "$WORK/pj/pjlib/include/pj/config_site.h" <<'CFG'
 /* Parley: audio-only SIP client. */
 #define PJMEDIA_HAS_VIDEO            0
 #define PJMEDIA_HAS_SRTP             1
-/* No TLS sockets yet (SIP over TLS is phase 4); SRTP has its own crypto. */
-#define PJ_HAS_SSL_SOCK              0
+/* SIP over TLS, with the OS's TLS library and trusted certificates: Secure
+ * Transport on macOS, the system OpenSSL on Linux (Schannel on Windows, see
+ * build-voice-deps.ps1). configure detects the same; this pins it. */
+#undef  PJ_HAS_SSL_SOCK
+#define PJ_HAS_SSL_SOCK              1
+#undef  PJ_SSL_SOCK_IMP
+#if defined(__APPLE__)
+#  define PJ_SSL_SOCK_IMP            PJ_SSL_SOCK_IMP_DARWIN
+#else
+#  define PJ_SSL_SOCK_IMP            PJ_SSL_SOCK_IMP_OPENSSL
+#endif
 #define PJMEDIA_HAS_OPUS_CODEC       1
 #define PJMEDIA_HAS_G722_CODEC       1
 /* Wideband conference bridge so Opus isn't squeezed through 8 kHz. */
@@ -99,16 +109,30 @@ cat > "$WORK/pj/pjlib/include/pj/config_site.h" <<'CFG'
  * library: turn it off too (we use the WebRTC AEC). */
 #define PJMEDIA_HAS_SPEEX_AEC        0
 #define PJSUA_MAX_CALLS              4
+/* Outbound-only TLS: no listening socket on the client. */
+#define PJSIP_TLS_TRANSPORT_DONT_CREATE_LISTENER 1
 #define PJSUA_MAX_ACC                4
 CFG
-(cd "$WORK/pj" && ./configure ${HOST_FLAG[@]+"${HOST_FLAG[@]}"} --prefix="$PREFIX" --disable-shared --disable-ssl \
+# TLS: on macOS, configure finds Secure Transport by itself; --disable-ssl
+# only stops it from also picking up a Homebrew OpenSSL (a dylib the app
+# would then depend on). On Linux it finds the system OpenSSL.
+SSL_FLAG=()
+[[ "$OS" == darwin ]] && SSL_FLAG=(--disable-ssl)
+(cd "$WORK/pj" && ./configure ${HOST_FLAG[@]+"${HOST_FLAG[@]}"} --prefix="$PREFIX" --disable-shared ${SSL_FLAG[@]+"${SSL_FLAG[@]}"} \
    --disable-video --disable-sdl --disable-ffmpeg --disable-v4l2 --disable-openh264 \
    --disable-libyuv --disable-vpx --disable-bcg729 \
    --disable-speex-codec --disable-gsm-codec --disable-ilbc-codec --disable-g7221-codec \
    --enable-libwebrtc-aec3 --with-opus="$PREFIX" > "$WORK/pj-configure.log" 2>&1 \
  && make dep > /dev/null 2>&1 && make -j"$JOBS" > "$WORK/pj-make.log" 2>&1 && make install > /dev/null)
 
-grep -E 'Using SSL|opus|alsa|ALSA|Checking sound|AEC3' "$WORK/pj-configure.log" | sed 's/^/   /' || true
+grep -E 'SSL|opus|alsa|ALSA|Checking sound|AEC3' "$WORK/pj-configure.log" | sed 's/^/   /' || true
+# The shim needs TLS (config_site.h says it's there): make sure configure
+# found the library to link it with.
+if [[ "$OS" == darwin ]]; then
+  grep -q 'Darwin SSL is available... yes' "$WORK/pj-configure.log" || { echo "pjproject: Secure Transport not found" >&2; exit 1; }
+else
+  grep -q 'OpenSSL library found' "$WORK/pj-configure.log" || { echo "pjproject: OpenSSL not found (install libssl-dev / openssl-devel)" >&2; exit 1; }
+fi
 # The shim relies on AEC3 being in the library (config_site.h says it is).
 grep -q 'webrtc-aec3' "$PREFIX/lib/pkgconfig/libpjproject.pc" || { echo "pjproject was built without WebRTC AEC3" >&2; exit 1; }
 echo "$WANT" > "$STAMP"

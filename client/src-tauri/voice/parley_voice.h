@@ -35,7 +35,7 @@ typedef struct pv_options {
 
 typedef struct pv_join_params {
     const char *room_uri;  /* sip:<room>@<domain> */
-    const char *proxy;     /* sip:<host>:<port>;transport=tcp */
+    const char *proxy;     /* sip:<host>:<port>;transport=tls (or tcp) */
     const char *realm;
     const char *username;
     const char *password;
@@ -62,6 +62,9 @@ typedef struct pv_device {
 int pv_init(const pv_options *opt, pv_event_cb cb, void *ctx);
 /* Stops everything (hangs up). */
 void pv_shutdown(void);
+
+/* 1 if SIP over TLS is available (needs pv_init): tell the server so. */
+int pv_has_tls(void);
 
 /* Joins a room (makes the call). 0 on success; the outcome arrives as events. */
 int pv_join(const pv_join_params *p);

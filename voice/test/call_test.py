@@ -8,15 +8,22 @@ parley/pjsua:dev image (voice/test/pjsua.Containerfile). Creates two
 throwaway users and deletes them afterwards (via psql).
 
     python3 voice/test/call_test.py --host 192.168.19.45
+
+SIP goes over TLS by default (--transport tcp for a plain-SIP server); the
+clients verify the server's certificate (--ca-file for a private CA).
 """
 import argparse
 import json
 import math
 import os
+import random
 import shutil
+import socket
+import struct
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -71,14 +78,19 @@ def sdp_answer(log):
 
 def pjsua(name, workdir, creds, local_port, rtp_port, play, rec, target, seconds, srtp=True):
     """Starts pjsua in a container joining `target`; returns the Popen."""
+    tls = "transport=tls" in creds["proxy"]
     args = [
         "--null-audio", "--no-udp", "--local-port", str(local_port), "--rtp-port", str(rtp_port),
         "--id", f"sip:{creds['username'].split(':')[1].split('.')[0]}@parley",
         "--outbound", creds["proxy"] + ";lr",
         "--realm", creds["realm"], "--username", creds["username"], "--password", creds["password"],
-        "--use-srtp", "2" if srtp else "0", "--srtp-secure", "0", "--add-codec", "opus",
+        # Like the app: over TLS, SRTP keys may only travel over TLS.
+        "--use-srtp", "2" if srtp else "0", "--srtp-secure", "1" if tls else "0", "--add-codec", "opus",
         "--max-calls", "1", "--log-level", "4", "--app-log-level", "4",
     ]
+    if tls:
+        args += ["--use-tls", "--tls-verify-server",
+                 "--tls-ca-file", "/work/ca.crt" if CA_FILE else "/etc/ssl/certs/ca-certificates.crt"]
     if play:
         args += ["--play-file", f"/work/{play}", "--auto-play"]  # the player loops the file by default
     if rec:
@@ -91,6 +103,52 @@ def pjsua(name, workdir, creds, local_port, rtp_port, play, rec, target, seconds
 
 
 PJSUA_NETWORK = "host"
+CA_FILE = None
+TRANSPORTS = ["tls"]
+
+
+def join(voice, conv_id, token, transports=None):
+    body = {"transports": transports if transports is not None else TRANSPORTS}
+    return http("POST", voice + f"/v1/calls/{conv_id}/join", token, body)
+
+
+def rtp_media_port(log):
+    """The server's audio port from the SDP answer in a (running) pjsua log."""
+    for line in sdp_answer(log).splitlines():
+        if line.startswith("m=audio "):
+            return int(line.split()[1])
+    return None
+
+
+def spoof_rtp(host, port, seconds=2.0):
+    """An attacker who knows a call's media port sends forged audio packets
+    (plain RTP, no valid SRTP authentication) from another address. If the
+    server re-aimed the call's audio at the newest source address it would
+    send the call's audio here ("RTP bleed"). Returns packets received back."""
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.bind(("0.0.0.0", 0))
+    sock.settimeout(0.02)
+    ssrc, seq, ts, got = random.getrandbits(32), random.getrandbits(16), random.getrandbits(32), 0
+    end = time.time() + seconds
+    while time.time() < end:
+        hdr = struct.pack("!BBHII", 0x80, 111, seq & 0xFFFF, ts & 0xFFFFFFFF, ssrc)
+        sock.sendto(hdr + os.urandom(80) + os.urandom(10), (host, port))
+        seq, ts = seq + 1, ts + 960
+        try:
+            while True:
+                sock.recvfrom(2048)
+                got += 1
+        except (socket.timeout, BlockingIOError):
+            pass
+    time.sleep(0.5)
+    try:
+        while True:
+            sock.recvfrom(2048)
+            got += 1
+    except (socket.timeout, BlockingIOError):
+        pass
+    sock.close()
+    return got
 
 
 def main():
@@ -103,9 +161,14 @@ def main():
     ap.add_argument("--pjsua-network", default="host",
                     help="podman network for the SIP clients, e.g. 'kind' to call into a kind cluster's node")
     ap.add_argument("--app", metavar="VOICEPROBE", help="use the desktop app's voice engine (path to the voiceprobe binary) for alice instead of pjsua")
+    ap.add_argument("--transport", choices=["tls", "tcp"], default="tls",
+                    help="SIP transport the test clients ask voice-control for (tcp = a client before 0.4)")
+    ap.add_argument("--ca-file", help="CA certificate the pjsua clients trust for SIP over TLS (default: the public CAs)")
     opt = ap.parse_args()
-    global PJSUA_NETWORK
+    global PJSUA_NETWORK, CA_FILE, TRANSPORTS
     PJSUA_NETWORK = opt.pjsua_network
+    CA_FILE = opt.ca_file
+    TRANSPORTS = [opt.transport]
     if opt.group:
         return group_call(opt)
     api, voice = opt.api or f"http://{opt.host}:18080", opt.voice or f"http://{opt.host}:18082"
@@ -120,6 +183,8 @@ def main():
     names = [f"calla{suffix}", f"callb{suffix}"]
     workdir = tempfile.mkdtemp(prefix="parley-call-")
     os.chmod(workdir, 0o777)
+    if CA_FILE:
+        shutil.copy(CA_FILE, os.path.join(workdir, "ca.crt"))
     try:
         sess = []
         for n in names:
@@ -132,11 +197,19 @@ def main():
         st, conv = http("POST", api + "/v1/conversations/dm", a["access_token"], {"user_id": b["user"]["id"]})
         conv_id = conv["id"]
 
-        st, ja = http("POST", voice + f"/v1/calls/{conv_id}/join", a["access_token"])
-        st2, jb = http("POST", voice + f"/v1/calls/{conv_id}/join", b["access_token"])
+        st, ja = join(voice, conv_id, a["access_token"])
+        st2, jb = join(voice, conv_id, b["access_token"])
         check(st == 200 and st2 == 200 and ja["call"] is None, "voice-control issues join credentials; no call yet")
+        want = "transport=" + opt.transport
+        check(want in ja["sip"]["proxy"], f"the client is sent to a {opt.transport.upper()} proxy ({ja['sip']['proxy']})")
+        if opt.transport == "tls":
+            st_old, j_old = join(voice, conv_id, a["access_token"], [])
+            if st_old == 426:
+                print("PASS a client without TLS (before 0.4) is told to update (426): the server is TLS-only")
+            else:
+                print(f"     note: the server also gives clients without TLS a plain proxy ({j_old['sip']['proxy']})")
 
-        st, _ = http("POST", voice + f"/v1/calls/{conv_id}/join")
+        st, _ = join(voice, conv_id, None)
         check(st == 401, "join without a token is refused")
 
         # Tones: alice 440 Hz, bob 880 Hz.
@@ -155,7 +228,14 @@ def main():
             pa = pjsua("alice", workdir, ja["sip"], 5070, 40000, "a.wav", "a-rec.wav", target, 14)
         time.sleep(3)
         pb = pjsua("bob", workdir, jb["sip"], 5072, 40100, "b.wav", "b-rec.wav", target, 10)
-        time.sleep(5)
+        time.sleep(4)
+        # Bob's call is up: attack its media port (see spoof_rtp) while it runs.
+        bob_port = rtp_media_port(open(os.path.join(workdir, "bob.log"), errors="replace").read())
+        spoofed = {}
+        attacker = threading.Thread(target=lambda: spoofed.update(back=spoof_rtp(opt.host, bob_port))) if bob_port else None
+        if attacker:
+            attacker.start()
+        time.sleep(1)
         st, fresh = http("POST", api + "/v1/auth/login", body={"username": names[0], "password": PASSWORD})
         st, calls = http("GET", voice + "/v1/calls", fresh["access_token"])
         parts = calls["calls"][0]["participants"] if calls and calls.get("calls") else []
@@ -171,6 +251,8 @@ def main():
         p3 = pjsua("plainrtp", workdir, ja["sip"], 5078, 40400, None, None, target, 4, srtp=False)
         for p in (pa, pb, p1, p2, p3):
             p.wait(timeout=60)
+        if attacker:
+            attacker.join()
 
         logs = {n: open(os.path.join(workdir, n + ".log"), errors="replace").read() for n in ("alice", "bob", "wrongroom", "badpass", "plainrtp")}
         check("CONFIRMED" not in logs["plainrtp"], "a client offering unencrypted audio (plain RTP) is refused")
@@ -194,6 +276,12 @@ def main():
         print(f"     alice's recording: 880 Hz power {heard_by_a[0]:.3g}, 440 Hz (own tone) {heard_by_a[1]:.3g}")
         check(heard_by_b[0] > 1e6 and heard_by_b[0] > 20 * heard_by_b[1], "bob hears alice (440 Hz) and not his own echo")
         check(heard_by_a[0] > 1e6 and heard_by_a[0] > 20 * heard_by_a[1], "alice hears bob (880 Hz) and not her own echo")
+        # The forged packets went in ~4-6 s after bob's call started; he must
+        # still hear alice afterwards, and the attacker must get nothing.
+        after = tone_power(os.path.join(workdir, "b-rec.wav"), 440, skip_s=6.5, window_s=2.5)
+        check(bob_port is not None, f"found bob's media port on the server ({bob_port})")
+        check(spoofed.get("back") == 0, f"forged audio packets don't redirect the call's audio (attacker got {spoofed.get('back')} packets)")
+        check(after > 1e6, f"bob still hears alice after the forged packets ({after:.3g})")
 
         time.sleep(1)
         # Access tokens may be short-lived (the dev api uses 5s): log in again.
@@ -229,6 +317,8 @@ def group_call(opt):
     names = [f"grp{p[0]}{suffix}" for p in people]
     workdir = tempfile.mkdtemp(prefix="parley-group-")
     os.chmod(workdir, 0o777)
+    if CA_FILE:
+        shutil.copy(CA_FILE, os.path.join(workdir, "ca.crt"))
     try:
         sess = []
         for n in names:
@@ -243,7 +333,7 @@ def group_call(opt):
         assert st == 201, (st, conv)
         creds = []
         for s_ in sess:
-            st, j = http("POST", voice + f"/v1/calls/{conv['id']}/join", s_["access_token"])
+            st, j = join(voice, conv["id"], s_["access_token"])
             assert st == 200, (st, j)
             creds.append(j["sip"])
         for (who, hz) in people:

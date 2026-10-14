@@ -7,12 +7,12 @@
 # relays it to the media server (FreeSWITCH) on loopback. Media goes
 # client <-> FreeSWITCH directly.
 #
-# Environment:
-#   PARLEY_SIP_SECRET     shared with voice-control (HMAC key). Required.
-#   PARLEY_SIP_MEDIA      where FreeSWITCH listens, e.g. "sip:127.0.0.1:5080"
-#   PARLEY_SIP_ADVERTISE  host[:port] clients reach this server on (LAN/public IP)
-
-# (rendered from this template by entrypoint.sh)
+# Clients connect over TLS (WITH_TLS, port 5061 by default); plain SIP on
+# 5060 (WITH_PLAIN) is only for clients older than 0.4 and can be turned off.
+# FreeSWITCH talks to Kamailio on a loopback-only socket.
+#
+# Rendered from this template by entrypoint.sh, which documents the
+# environment and sets WITH_TLS / WITH_PLAIN.
 
 #!define FLT_NATS 5
 #!define FLB_NATB 6
@@ -25,14 +25,36 @@ fork=yes
 children=4
 auto_aliases=no
 
-listen=udp:0.0.0.0:5060 advertise ${PARLEY_SIP_ADVERTISE}
-listen=tcp:0.0.0.0:5060 advertise ${PARLEY_SIP_ADVERTISE}
+# Don't tell scanners which SIP server (and version) this is.
+server_signature=no
+user_agent_header="User-Agent: Parley"
+
+# FreeSWITCH side: loopback only.
+#!define MEDIA_SOCKET "udp:127.0.0.1:5090"
+listen=udp:127.0.0.1:5090
+
+#!ifdef WITH_PLAIN
+listen=udp:${PARLEY_SIP_BIND}:5060 advertise ${PARLEY_SIP_ADVERTISE}:5060
+listen=tcp:${PARLEY_SIP_BIND}:5060 advertise ${PARLEY_SIP_ADVERTISE}:5060
+#!endif
+
+#!ifdef WITH_TLS
+enable_tls=yes
+# OpenSSL 3: initialise it safely for Kamailio's forked workers.
+tls_threads_mode=2
+# Advertised by name: clients check the certificate against it, also for
+# in-dialog requests (BYE) that follow the Record-Route.
+listen=tls:${PARLEY_SIP_BIND}:${PARLEY_SIP_TLS_PORT} advertise ${PARLEY_SIP_TLS_ADVERTISE}
+#!endif
 
 # Keep idle client TCP connections (the call's signaling path) open.
 tcp_connection_lifetime=3605
 tcp_keepalive=yes
 tcp_keepidle=30
 tcp_accept_no_cl=yes
+# Bound what a flood of connections can take.
+tcp_max_connections=4096
+tls_max_connections=4096
 
 ####### Modules ########
 loadmodule "kex.so"
@@ -50,6 +72,12 @@ loadmodule "sanity.so"
 loadmodule "nathelper.so"
 loadmodule "auth.so"
 loadmodule "auth_ephemeral.so"
+loadmodule "pike.so"
+loadmodule "htable.so"
+loadmodule "ctl.so"
+#!ifdef WITH_TLS
+loadmodule "tls.so"
+#!endif
 
 modparam("tm", "failure_reply_mode", 3)
 modparam("tm", "fr_timer", 30000)
@@ -58,6 +86,17 @@ modparam("rr", "enable_full_lr", 0)
 modparam("rr", "append_fromtag", 0)
 modparam("auth_ephemeral", "secret", "${PARLEY_SIP_SECRET}")
 modparam("auth_ephemeral", "username_format", 1)
+# Flood control: more than 30 requests in 2 s from one IP bans it for 5 min.
+# A client joining a call sends a handful.
+modparam("pike", "sampling_time_unit", 2)
+modparam("pike", "reqs_density_per_unit", 30)
+modparam("pike", "remove_latency", 4)
+modparam("htable", "htable", "banned=>size=10;autoexpire=300;")
+# entrypoint.sh reloads the TLS certificate through this when it's renewed.
+modparam("ctl", "binrpc", "unix:/tmp/kamailio_ctl")
+#!ifdef WITH_TLS
+modparam("tls", "config", "/tmp/kamailio-tls.cfg")
+#!endif
 
 ####### Routing ########
 
@@ -99,10 +138,26 @@ request_route {
 
 	record_route();
 	$du = "${PARLEY_SIP_MEDIA}";
+	$fs = MEDIA_SOCKET;
 	route(RELAY);
 }
 
 route[REQINIT] {
+	# Everything but FreeSWITCH on loopback comes from the internet.
+	if ($si != "127.0.0.1") {
+		if ($sht(banned=>$si) != $null) {
+			exit;
+		}
+		if (!pike_check_req()) {
+			xlog("L_WARN", "flood from $si: banned for 5 minutes\n");
+			$sht(banned=>$si) = 1;
+			exit;
+		}
+		# Known SIP scanners: don't even answer.
+		if ($ua =~ "friendly-scanner|sipvicious|SIPVicious|sipcli|sip-scan|sundayddr|iWar|VaxSIPUserAgent|pplsip") {
+			exit;
+		}
+	}
 	if (!mf_process_maxfwd_header("10")) {
 		sl_send_reply("483", "Too Many Hops");
 		exit;

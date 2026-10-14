@@ -36,6 +36,7 @@ static pjsua_call_id g_call = PJSUA_INVALID_ID;
 static int g_muted, g_deaf;
 static pjsua_player_id g_player = PJSUA_INVALID_ID;
 static pjsua_recorder_id g_recorder = PJSUA_INVALID_ID;
+static int g_has_tls;
 
 /* pjsua requires every calling thread to be registered with pjlib. */
 static void ensure_thread(void) {
@@ -108,6 +109,42 @@ static void on_call_media_state(pjsua_call_id call_id) {
     int active = ci.media_status == PJSUA_CALL_MEDIA_ACTIVE;
     if (active) route_audio();
     emit(PV_EV_MEDIA, active, 0, NULL);
+}
+
+/* SIP over TLS to Kamailio, verifying its certificate against the OS's
+ * trusted CAs and the server's name (outbound only: see config_site.h).
+ * macOS and Windows use the system trust store; OpenSSL on Linux has to be
+ * told where the distribution keeps its CA bundle. */
+static pj_status_t create_tls_transport(void) {
+    pjsua_transport_config cfg;
+    pjsua_transport_config_default(&cfg);
+    cfg.port = 0;
+    cfg.tls_setting.verify_server = PJ_TRUE;
+    cfg.tls_setting.timeout.sec = 10;
+#if PJ_SSL_SOCK_IMP == PJ_SSL_SOCK_IMP_OPENSSL
+    static const char *const bundles[] = {
+        "/etc/ssl/certs/ca-certificates.crt", /* Debian, Ubuntu, Arch, Gentoo */
+        "/etc/pki/tls/certs/ca-bundle.crt",   /* Fedora, RHEL */
+        "/etc/ssl/ca-bundle.pem",             /* openSUSE */
+        "/etc/ssl/cert.pem",                  /* Alpine, Void */
+    };
+    for (unsigned i = 0; i < PJ_ARRAY_SIZE(bundles); i++) {
+        if (pj_file_exists(bundles[i])) {
+            cfg.tls_setting.ca_list_file = pj_str((char *)bundles[i]);
+            break;
+        }
+    }
+    if (cfg.tls_setting.ca_list_file.slen == 0) {
+        if (!pj_file_exists("/etc/ssl/certs")) {
+            PJ_LOG(1, ("parley", "no trusted CA certificates found: SIP over TLS disabled"));
+            return PJ_ENOTFOUND;
+        }
+        cfg.tls_setting.ca_list_path = pj_str("/etc/ssl/certs");
+    }
+#endif
+    pj_status_t st = pjsua_transport_create(PJSIP_TRANSPORT_TLS, &cfg, NULL);
+    if (st != PJ_SUCCESS) PJ_LOG(1, ("parley", "SIP over TLS unavailable (error %d)", st));
+    return st;
 }
 
 static void configure_codecs(void) {
@@ -188,6 +225,9 @@ int pv_init(const pv_options *opt, pv_event_cb cb, void *ctx) {
         pjsua_destroy();
         return -3;
     }
+    /* TLS is preferred, but servers before 0.4 only speak plain TCP: a
+     * missing TLS transport only rules out TLS (see pv_has_tls). */
+    g_has_tls = create_tls_transport() == PJ_SUCCESS;
     if (opt && opt->null_audio) pjsua_set_null_snd_dev();
     if (pjsua_start() != PJ_SUCCESS) {
         pjsua_destroy();
@@ -206,6 +246,10 @@ void pv_shutdown(void) {
     g_started = 0;
     g_call = PJSUA_INVALID_ID;
     g_acc = PJSUA_INVALID_ID;
+}
+
+int pv_has_tls(void) {
+    return g_has_tls;
 }
 
 int pv_join(const pv_join_params *p) {
@@ -234,7 +278,9 @@ int pv_join(const pv_join_params *p) {
     acc.cred_info[0].data_type = PJSIP_CRED_DATA_PLAIN_PASSWD;
     acc.cred_info[0].data = pj_str((char *)p->password);
     acc.use_srtp = PJMEDIA_SRTP_MANDATORY;
-    acc.srtp_secure_signaling = 0; /* signaling is TCP until TLS (phase 4) */
+    /* The SDP carries the SRTP keys: over a TLS proxy, refuse to send them
+     * any other way. Servers before 0.4 hand out a plain TCP proxy. */
+    acc.srtp_secure_signaling = strstr(p->proxy, "transport=tls") ? 1 : 0;
     acc.allow_contact_rewrite = PJ_TRUE;
     /* RTCP on the same port as RTP (RFC 5761): one NAT mapping instead of
      * two, and the server can't mis-latch a separate RTCP port. */

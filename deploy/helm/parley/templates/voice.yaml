@@ -1,13 +1,25 @@
 {{- if .Values.voice.enabled }}
 {{- $name := printf "%s-voice" (include "parley.name" .) }}
 {{- $secret := include "parley.secretName" . }}
+{{- $sip := .Values.voice.sip }}
+{{- $tlsSecret := $sip.tls.secretName }}
+{{- if and $sip.tls.enabled (not $tlsSecret) .Values.ingress.enabled .Values.ingress.tls.enabled }}
+{{- $tlsSecret = default (printf "%s-tls" (include "parley.name" .)) .Values.ingress.tls.secretName }}
+{{- end }}
+{{- if and $sip.tls.enabled (not $tlsSecret) }}
+{{- fail "voice.sip.tls needs a certificate for host: enable ingress.tls, set voice.sip.tls.secretName, or turn voice.sip.tls off (and voice.sip.plain on)" }}
+{{- end }}
+{{- if not (or $sip.tls.enabled $sip.plain.enabled) }}
+{{- fail "enable voice.sip.tls and/or voice.sip.plain" }}
+{{- end }}
 {{- /*
   Kamailio (SIP edge), FreeSWITCH (audio mixing) and voice-control (rooms) in
   one pod on the media node's own network:
-  - clients reach SIP on <advertise>:5060 and send audio straight to the
-    node's UDP ports, with no NAT or load balancer in between;
-  - Kamailio -> FreeSWITCH (127.0.0.1:5080) and voice-control -> FreeSWITCH
-    Event Socket (127.0.0.1:8021) stay on the node's loopback.
+  - clients reach SIP on <host>:5061 (TLS; plain <advertise>:5060 for old
+    clients if enabled) and send audio straight to the node's UDP ports,
+    with no NAT or load balancer in between;
+  - Kamailio <-> FreeSWITCH (127.0.0.1:5090 / 5080) and voice-control ->
+    FreeSWITCH Event Socket (127.0.0.1:8021) stay on the node's loopback.
   One replica: FreeSWITCH holds the calls and voice-control the room state.
 */}}
 apiVersion: apps/v1
@@ -49,6 +61,17 @@ spec:
       {{- end }}
       securityContext:
         {{- include "parley.podSecurity" . | nindent 8 }}
+        {{- if $sip.tls.enabled }}
+        # Kamailio's group (in its image) reads the TLS key.
+        fsGroup: 101
+        {{- end }}
+      {{- if $sip.tls.enabled }}
+      volumes:
+        - name: sip-tls
+          secret:
+            secretName: {{ $tlsSecret }}
+            defaultMode: 0440
+      {{- end }}
       # Calls in progress end when the pod stops; let hangups go out.
       terminationGracePeriodSeconds: 20
       containers:
@@ -85,20 +108,41 @@ spec:
           image: {{ include "parley.image" (list . "kamailio") }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           env:
+            - name: PARLEY_SIP_SECRET
+              valueFrom:
+                secretKeyRef: { name: {{ $secret }}, key: sip-secret }
+            - name: PARLEY_SIP_PLAIN
+              value: {{ ternary "yes" "no" $sip.plain.enabled | quote }}
+            {{- if $sip.plain.enabled }}
             - name: PARLEY_SIP_ADVERTISE
               {{- if .Values.voice.advertiseAddress }}
               value: {{ .Values.voice.advertiseAddress | quote }}
               {{- else }}
               valueFrom: { fieldRef: { fieldPath: status.hostIP } }
               {{- end }}
-            - name: PARLEY_SIP_SECRET
-              valueFrom:
-                secretKeyRef: { name: {{ $secret }}, key: sip-secret }
+            {{- end }}
+            {{- if $sip.tls.enabled }}
+            - name: PARLEY_SIP_TLS_CERT_DIR
+              value: /etc/parley/sip-tls
+            - name: PARLEY_SIP_TLS_PORT
+              value: {{ $sip.tls.port | quote }}
+            - name: PARLEY_SIP_TLS_ADVERTISE
+              value: {{ printf "%s:%v" (required "host is required" .Values.host) $sip.tls.port | quote }}
+            {{- end }}
+          {{- if $sip.tls.enabled }}
+          volumeMounts:
+            - { name: sip-tls, mountPath: /etc/parley/sip-tls, readOnly: true }
+          {{- end }}
           ports:
+            {{- if $sip.tls.enabled }}
+            - { name: sip-tls, containerPort: {{ $sip.tls.port }}, protocol: TCP }
+            {{- end }}
+            {{- if $sip.plain.enabled }}
             - { name: sip-tcp, containerPort: 5060, protocol: TCP }
             - { name: sip-udp, containerPort: 5060, protocol: UDP }
+            {{- end }}
           readinessProbe:
-            tcpSocket: { port: 5060 }
+            tcpSocket: { port: {{ ternary $sip.tls.port 5060 $sip.tls.enabled }} }
             periodSeconds: 10
           resources:
             {{- toYaml .Values.voice.kamailio.resources | nindent 12 }}
@@ -142,8 +186,14 @@ spec:
             - name: PARLEY_SIP_SECRET
               valueFrom:
                 secretKeyRef: { name: {{ $secret }}, key: sip-secret }
+            {{- if $sip.tls.enabled }}
+            - name: PARLEY_SIP_PROXY_TLS
+              value: {{ printf "sip:%s:%v;transport=tls" .Values.host $sip.tls.port | quote }}
+            {{- end }}
+            {{- if $sip.plain.enabled }}
             - name: PARLEY_SIP_PROXY
               value: "sip:$(SIP_HOST):5060;transport=tcp"
+            {{- end }}
             - name: PARLEY_SIP_CRED_TTL
               value: {{ .Values.voice.credentialTTL | quote }}
           ports:

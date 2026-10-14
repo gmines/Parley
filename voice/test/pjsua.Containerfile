@@ -17,7 +17,7 @@ RUN printf '#define PJMEDIA_HAS_VIDEO 0\n#define PJMEDIA_HAS_SRTP 1\n' > pjlib/i
     && cp pjsip-apps/bin/pjsua-* /usr/local/bin/pjsua
 
 FROM debian:bookworm-slim
-RUN apt-get update && apt-get install -y --no-install-recommends libopus0 libssl3 sox \
+RUN apt-get update && apt-get install -y --no-install-recommends libopus0 libssl3 ca-certificates sox \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=build /usr/local/bin/pjsua /usr/local/bin/pjsua
 ENTRYPOINT ["pjsua"]

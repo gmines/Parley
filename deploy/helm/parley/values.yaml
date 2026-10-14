@@ -68,10 +68,26 @@ voice:
   nodeSelector:
     parley.chat/media: "true"
   tolerations: []
-  # Address clients send SIP and audio to: the media node's LAN IP, or your
-  # public IP when the router forwards SIP (TCP 5060) and the audio ports
-  # below to that node. Empty = the node's own IP.
+  # Address clients send audio (and plain SIP) to: the media node's LAN IP,
+  # or your public IP when the router forwards the SIP and audio ports below
+  # to that node. Empty = the node's own IP.
   advertiseAddress: ""
+  sip:
+    # SIP over TLS (clients 0.4+): call setup, including the audio
+    # encryption keys, is encrypted. Clients connect to `host` on this port
+    # and check the certificate against it, so it needs a real certificate
+    # for `host`: by default the ingress's (cert-manager renews it, and
+    # Kamailio reloads it without dropping calls).
+    tls:
+      enabled: true
+      port: 5061
+      # Secret with tls.crt/tls.key for `host`. Default: the ingress's.
+      secretName: ""
+    # Plain SIP on TCP/UDP 5060, for clients older than 0.4 (no TLS). Call
+    # setup and the audio keys then cross the network unencrypted. With TLS
+    # on, clients that support it always use TLS.
+    plain:
+      enabled: false
   # UDP ports for audio (two per caller), opened on the media node.
   rtpPortStart: 10000
   rtpPortEnd: 10999

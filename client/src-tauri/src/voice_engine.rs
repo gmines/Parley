@@ -54,6 +54,7 @@ type EventCb = extern "C" fn(ctx: *mut c_void, kind: c_int, a: c_int, b: c_int, 
 extern "C" {
     fn pv_init(opt: *const PvOptions, cb: EventCb, ctx: *mut c_void) -> c_int;
     fn pv_shutdown();
+    fn pv_has_tls() -> c_int;
     fn pv_join(p: *const PvJoinParams) -> c_int;
     fn pv_leave();
     fn pv_set_mute(muted: c_int);
@@ -186,6 +187,12 @@ impl Engine {
             -2 => Err("already in a call".into()),
             rc => Err(format!("couldn't start the call (code {rc})")),
         }
+    }
+
+    /// SIP transports this engine can use, in order of preference: what
+    /// voice-control picks the outbound proxy from.
+    pub fn transports(&self) -> &'static [&'static str] {
+        if unsafe { pv_has_tls() } != 0 { &["tls", "tcp"] } else { &["tcp"] }
     }
 
     pub fn leave(&self) {

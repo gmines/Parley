@@ -3,7 +3,7 @@
 Calls are native SIP/RTP, not WebRTC:
 
 ```
-desktop client (pjsip) ──SIP/TCP──► Kamailio :5060 ──SIP/UDP loopback──► FreeSWITCH :5080
+desktop client (pjsip) ──SIP/TLS──► Kamailio :5061 ──SIP/UDP loopback──► FreeSWITCH :5080
         │                              (auth, NAT fix-up)                  │ Event Socket (loopback :8021)
         └────────── SRTP (Opus+FEC / G.722) ───────────► FreeSWITCH RTP     ▼
                                           (10000-10999/udp)          voice-control (Go)
@@ -16,6 +16,14 @@ desktop client (pjsip) ──SIP/TCP──► Kamailio :5060 ──SIP/UDP loopb
   when the last person leaves.
 - **Clients never register.** They only make outbound calls when joining, so
   nothing needs to reach into a user's network.
+- **SIP over TLS.** Clients (0.4+) connect to Kamailio on 5061 by hostname and
+  check its certificate against the OS's trusted CAs, so the SDP, which
+  carries the SRTP keys, can't be read or altered on the way; over TLS the
+  client also refuses to send SRTP keys any other way. The join request says
+  which transports the client has (`{"transports": ["tls", "tcp"]}`) and
+  voice-control picks the proxy: TLS when both sides have it, plain TCP on
+  5060 only for older clients and only if the server enables it (otherwise
+  426, "update Parley").
 - **Kamailio** checks the credentials (`auth_ephemeral`: `<expiry>:<user>.<room>`,
   HMAC-SHA1 with a secret shared with voice-control), refuses credentials for a
   different room, replaces any client-supplied `X-Parley-User` with the verified
@@ -51,11 +59,19 @@ PARLEY_ESL_PASSWORD=$ESL PARLEY_SIP_SECRET=$SECRET PARLEY_SIP_PROXY="sip:$IP:506
   go run ./services/voice-control
 ```
 
-Then set `PARLEY_VOICE_PUBLIC_URL=http://$IP:8082` on the api.
+Then set `PARLEY_VOICE_PUBLIC_URL=http://$IP:8082` on the api. This runs plain
+SIP (no certificate): for TLS, give Kamailio a certificate for a hostname
+clients resolve (`PARLEY_SIP_TLS_CERT_DIR` with `tls.crt`/`tls.key`, see
+`kamailio/entrypoint.sh`) and voice-control
+`PARLEY_SIP_PROXY_TLS="sip:<hostname>:5061;transport=tls"`.
 
-Ports: `5060/tcp+udp` (SIP, must be reachable by clients), `10000-10999/udp`
-(audio, must be reachable by clients). `8021` (Event Socket) and `5080`
-(FreeSWITCH SIP) stay on loopback.
+Ports: `5061/tcp` (SIP over TLS) and/or `5060/tcp+udp` (plain SIP), and
+`10000-10999/udp` (audio): all must be reachable by clients. `8021` (Event
+Socket), `5080` (FreeSWITCH SIP) and `5090` (Kamailio's FreeSWITCH side) stay
+on loopback.
+
+Kamailio also rate-limits per IP (more than ~30 requests in 2 s: ignored for
+5 minutes), ignores known SIP scanners, and doesn't announce its version.
 
 ## Testing without the app
 
@@ -65,25 +81,33 @@ different tone and records what it hears. The script checks with a Goertzel
 filter that everyone hears the others and not themselves, and that the server's
 SDP answer requires SRTP and offers Opus with FEC on the right address. It also
 checks that credentials for another room, forged passwords and unencrypted
-(plain RTP) calls are refused, and that the room closes afterwards.
+(plain RTP) calls are refused, that forged audio packets sent to a call's
+media port from another address don't redirect its audio ("RTP bleed"), and
+that the room closes afterwards. SIP goes over TLS (verifying the server's
+certificate) unless `--transport tcp`.
 
 ```sh
-python3 voice/test/call_test.py --host 192.168.19.45          # 1:1 DM call
-python3 voice/test/call_test.py --host 192.168.19.45 --group  # 3 people, mixed by the conference
+# A server with SIP over TLS: --host is the media IP, HTTP goes to the hostname.
+S="--host 203.0.113.5 --api https://parley.example.org --voice https://parley.example.org --db <postgres URL>"
+python3 voice/test/call_test.py $S            # 1:1 DM call
+python3 voice/test/call_test.py $S --group    # 3 people, mixed by the conference
 
 # The desktop app's own voice engine as one participant:
 (cd client/src-tauri && cargo build --features voiceprobe --bin voiceprobe)
-python3 voice/test/call_test.py --host 192.168.19.45 --app client/src-tauri/target/debug/voiceprobe
+python3 voice/test/call_test.py $S --app client/src-tauri/target/debug/voiceprobe
+
+# The plain-SIP LAN dev server (no certificate):
+python3 voice/test/call_test.py --host 192.168.19.45 --transport tcp
 
 # A Helm deployment in a local kind cluster (rootless podman): SIP clients join
 # the "kind" network to reach the media node; HTTP goes through the ingress
-# (e.g. kubectl -n traefik port-forward svc/traefik 28000:80, host=localhost).
-python3 voice/test/call_test.py --host <kind node IP> --pjsua-network kind \
+# (e.g. kubectl -n traefik port-forward svc/traefik 28000:80, host=localhost,
+# voice.sip.tls.enabled=false, voice.sip.plain.enabled=true).
+python3 voice/test/call_test.py --host <kind node IP> --pjsua-network kind --transport tcp \
   --api http://localhost:28000 --voice http://localhost:28000 --db <postgres URL>
 ```
 
 ## Not done yet
 
-- SIP over TLS (`5061`/`443`): signaling is TCP for now, so SRTP keys travel in clear SDP.
 - TURN/ICE fallback for networks that block UDP, and call recovery across network changes (phase 4).
 - The desktop client builds pjproject + Opus itself: see `client/scripts/build-voice-deps.*`.

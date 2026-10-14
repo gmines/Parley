@@ -5,6 +5,7 @@ package server
 import (
 	"errors"
 	"net/http"
+	"slices"
 	"time"
 
 	"github.com/google/uuid"
@@ -19,9 +20,14 @@ type Server struct {
 	Verifier *auth.Verifier
 
 	SIPSecret []byte
-	SIPProxy  string // outbound proxy clients connect to, e.g. sip:203.0.113.5:5060;transport=tcp
-	SIPDomain string // host part of room URIs
-	CredTTL   time.Duration
+	// Outbound proxies clients connect to. SIPProxyTLS (e.g.
+	// sip:voice.example.org:5061;transport=tls) is given to clients that
+	// support TLS; SIPProxy (plain TCP, e.g. sip:203.0.113.5:5060;transport=tcp)
+	// to older ones. Either may be empty, not both.
+	SIPProxy    string
+	SIPProxyTLS string
+	SIPDomain   string // host part of room URIs
+	CredTTL     time.Duration
 }
 
 func (s *Server) Handler() http.Handler {
@@ -68,6 +74,30 @@ func (s *Server) list(w http.ResponseWriter, r *http.Request) error {
 	return nil
 }
 
+var errUpgradeRequired = httpx.NewError(http.StatusUpgradeRequired, "upgrade_required",
+	"This server only accepts encrypted calls. Update Parley to join calls.")
+
+// joinRequest is the optional body of a join: the SIP transports the client
+// supports. Clients that send none (before 0.4) only support "tcp".
+type joinRequest struct {
+	Transports []string `json:"transports"`
+}
+
+// proxyFor picks the outbound proxy for a client: TLS whenever both sides
+// support it, plain TCP only for clients that can't and only if enabled.
+func (s *Server) proxyFor(transports []string) (string, error) {
+	if len(transports) == 0 {
+		transports = []string{"tcp"}
+	}
+	if s.SIPProxyTLS != "" && slices.Contains(transports, "tls") {
+		return s.SIPProxyTLS, nil
+	}
+	if s.SIPProxy != "" && slices.Contains(transports, "tcp") {
+		return s.SIPProxy, nil
+	}
+	return "", errUpgradeRequired
+}
+
 // join returns short-lived SIP credentials for the conversation's call room,
 // plus the call's current state (null if nobody's in it yet: the caller's
 // joining starts it).
@@ -76,11 +106,21 @@ func (s *Server) join(w http.ResponseWriter, r *http.Request) error {
 	if err != nil {
 		return err
 	}
+	var req joinRequest
+	if r.ContentLength != 0 {
+		if err := httpx.DecodeJSON(w, r, &req); err != nil {
+			return err
+		}
+	}
+	proxy, err := s.proxyFor(req.Transports)
+	if err != nil {
+		return err
+	}
 	user := caller(r)
 	if _, err := s.Calls.Authorize(r.Context(), user, conv); err != nil {
 		return mapErr(err)
 	}
-	creds := calls.Mint(s.SIPSecret, user, conv, s.SIPProxy, s.SIPDomain, s.CredTTL, time.Now())
+	creds := calls.Mint(s.SIPSecret, user, conv, proxy, s.SIPDomain, s.CredTTL, time.Now())
 	var current *calls.Call
 	if c, ok := s.Calls.Get(conv); ok {
 		current = &c

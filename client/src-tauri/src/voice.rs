@@ -94,10 +94,12 @@ pub async fn voice_join(app: AppHandle, state: State<'_, AppState>, conversation
     }
     let user = state.session.current_user().await.ok_or(AppError::NotLoggedIn)?;
     let base = voice_base(&state).await?;
-    let resp: Value = state.session.call_at(&base, Method::POST, &format!("v1/calls/{conv}/join"), None).await?;
+    let eng = engine(&app)?;
+    // The server hands out a TLS proxy when we can use one.
+    let body = json!({ "transports": eng.transports() });
+    let resp: Value = state.session.call_at(&base, Method::POST, &format!("v1/calls/{conv}/join"), Some(body)).await?;
     let creds: SipCredentials = serde_json::from_value(resp["sip"].clone()).map_err(internal)?;
 
-    let eng = engine(&app)?;
     {
         let s = state.voice.state.lock().unwrap();
         eng.set_mute(s.muted || s.deafened);

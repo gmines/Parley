@@ -7,7 +7,7 @@
 //!
 //!   voiceprobe --creds '<join response "sip" JSON>' --identity <user id> \
 //!              --play in.wav --record out.wav --seconds 10
-//!   voiceprobe --ec-selftest     (runs the echo canceller the app uses)
+//!   voiceprobe --selftest        (echo canceller the app uses, and SIP over TLS)
 //!   voiceprobe --list-devices
 
 use std::sync::mpsc;
@@ -26,21 +26,29 @@ fn arg(name: &str) -> Option<String> {
 }
 
 fn main() {
-    // Run the echo canceller at the app's settings on synthetic audio. A null
+    // Run the echo canceller at the app's settings on synthetic audio (a null
     // sound device skips echo cancellation entirely, so call tests can't
-    // catch problems in it.
-    if std::env::args().any(|a| a == "--ec-selftest") {
+    // catch problems in it), and check SIP over TLS is available.
+    if std::env::args().any(|a| a == "--selftest" || a == "--ec-selftest") {
         let engine = Engine::start(true, 1, |_| {}).expect("start engine");
         let result = engine.ec_selftest();
+        let transports = engine.transports();
         engine.shutdown();
+        let mut ok = true;
         match result {
             Ok(algo) => println!("echo canceller ok: {algo}"),
             Err(e) => {
                 eprintln!("echo canceller failed: {e}");
-                std::process::exit(1);
+                ok = false;
             }
         }
-        return;
+        if transports.contains(&"tls") {
+            println!("SIP transports: {}", transports.join(", "));
+        } else {
+            eprintln!("SIP over TLS unavailable (transports: {})", transports.join(", "));
+            ok = false;
+        }
+        std::process::exit(if ok { 0 } else { 1 });
     }
     // List the sound devices the engine sees (real audio backend), then exit.
     if std::env::args().any(|a| a == "--list-devices") {

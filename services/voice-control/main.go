@@ -10,13 +10,17 @@
 //	PARLEY_ESL_ADDR       FreeSWITCH Event Socket, default "127.0.0.1:8021"
 //	PARLEY_ESL_PASSWORD   Required.
 //	PARLEY_SIP_SECRET     shared with Kamailio. Required.
-//	PARLEY_SIP_PROXY      what clients connect to, e.g. "sip:203.0.113.5:5060;transport=tcp". Required.
-//	PARLEY_SIP_DOMAIN     host part of room URIs (default: the proxy's host)
+//	PARLEY_SIP_PROXY_TLS  what clients connect to over TLS, e.g. "sip:voice.example.org:5061;transport=tls"
+//	                      (a hostname: clients check Kamailio's certificate against it)
+//	PARLEY_SIP_PROXY      plain TCP proxy for clients without TLS (before 0.4), e.g.
+//	                      "sip:203.0.113.5:5060;transport=tcp". At least one of the two is required.
+//	PARLEY_SIP_DOMAIN     host part of room URIs (default: the TLS proxy's host, else the plain one's)
 //	PARLEY_SIP_CRED_TTL   default "5m"
 //	PARLEY_LISTEN_ADDR    default ":8082"
 package main
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -73,7 +77,7 @@ func run() error {
 	defer stop()
 
 	if err := required("PARLEY_DATABASE_URL", "PARLEY_NATS_URL", "PARLEY_VERIFY_KEY", "PARLEY_ESL_PASSWORD",
-		"PARLEY_SIP_SECRET", "PARLEY_SIP_PROXY"); err != nil {
+		"PARLEY_SIP_SECRET"); err != nil {
 		return err
 	}
 	key, err := auth.ParsePublicKey(os.Getenv("PARLEY_VERIFY_KEY"))
@@ -84,8 +88,11 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("PARLEY_SIP_CRED_TTL: %w", err)
 	}
-	proxy := os.Getenv("PARLEY_SIP_PROXY")
-	domain := env("PARLEY_SIP_DOMAIN", proxyHost(proxy))
+	proxy, proxyTLS := os.Getenv("PARLEY_SIP_PROXY"), os.Getenv("PARLEY_SIP_PROXY_TLS")
+	if proxy == "" && proxyTLS == "" {
+		return errors.New("set PARLEY_SIP_PROXY_TLS and/or PARLEY_SIP_PROXY")
+	}
+	domain := env("PARLEY_SIP_DOMAIN", proxyHost(cmp.Or(proxyTLS, proxy)))
 
 	pool, err := db.Connect(ctx, os.Getenv("PARLEY_DATABASE_URL"))
 	if err != nil {
@@ -102,12 +109,13 @@ func run() error {
 	go fs.Run(ctx, mgr.Resync, mgr)
 
 	srv := &server.Server{
-		Calls:     mgr,
-		Verifier:  auth.NewVerifier(key),
-		SIPSecret: []byte(os.Getenv("PARLEY_SIP_SECRET")),
-		SIPProxy:  proxy,
-		SIPDomain: domain,
-		CredTTL:   ttl,
+		Calls:       mgr,
+		Verifier:    auth.NewVerifier(key),
+		SIPSecret:   []byte(os.Getenv("PARLEY_SIP_SECRET")),
+		SIPProxy:    proxy,
+		SIPProxyTLS: proxyTLS,
+		SIPDomain:   domain,
+		CredTTL:     ttl,
 	}
 	httpSrv := &http.Server{Handler: srv.Handler(), ReadHeaderTimeout: 10 * time.Second, ReadTimeout: 30 * time.Second, WriteTimeout: 30 * time.Second}
 	ln, err := net.Listen("tcp", env("PARLEY_LISTEN_ADDR", ":8082"))
@@ -115,7 +123,7 @@ func run() error {
 		return err
 	}
 	b := buildinfo.Get()
-	slog.Info("voice-control listening", "addr", ln.Addr().String(), "sip_proxy", proxy, "version", b.Version, "commit", b.Commit)
+	slog.Info("voice-control listening", "addr", ln.Addr().String(), "sip_proxy_tls", proxyTLS, "sip_proxy", proxy, "version", b.Version, "commit", b.Commit)
 	errc := make(chan error, 1)
 	go func() { errc <- httpSrv.Serve(ln) }()
 

@@ -7,7 +7,7 @@ Deploys the whole Parley server: `api`, `realtime`, the voice stack
                        ┌──────────── Ingress (Traefik on k3s), one hostname ───────────┐
  app ── HTTPS/WSS 443 ─┤  /v1/realtime → realtime   /v1/calls → voice-control   / → api │
                        └────────────────────────────────────────────────────────────────┘
- app ── SIP TCP 5060 ─────────► media node (hostNetwork): Kamailio → FreeSWITCH ◄── voice-control
+ app ── SIP TLS 5061 ─────────► media node (hostNetwork): Kamailio → FreeSWITCH ◄── voice-control
  app ── audio UDP 10000-10999 ─► media node: FreeSWITCH            (all on the node's loopback)
                                  api, realtime, voice-control → Postgres, NATS (cluster services)
 ```
@@ -16,6 +16,13 @@ The voice pod runs on the node's own network. SIP and audio need an address
 clients can reach directly, with no load balancer or NAT in between: that's
 what prevents one-way audio. So it runs on one node you choose (the
 **media node**), and clients send audio straight to it.
+
+Call setup is SIP over TLS on port 5061 to `host`, using the same certificate
+as the web ingress: clients check it, so the audio encryption keys (in the
+call setup) can't be read or changed on the way. Kamailio reloads the
+certificate when cert-manager renews it, without dropping calls. Point
+`host` straight at your server: a CDN or proxy in front (like Cloudflare's
+orange cloud) only carries web traffic, not SIP or audio.
 
 ## Home lab: k3s on a few VMs
 
@@ -67,7 +74,7 @@ voice:
 Open the voice ports on the media VM if it runs a firewall:
 
 ```sh
-sudo firewall-cmd --permanent --add-port=5060/tcp --add-port=10000-10999/udp && sudo firewall-cmd --reload
+sudo firewall-cmd --permanent --add-port=5061/tcp --add-port=10000-10999/udp && sudo firewall-cmd --reload
 ```
 
 ### 4. DNS and TLS
@@ -126,11 +133,12 @@ Forward these from your router:
 | Port | To |
 |---|---|
 | TCP 443 | any k3s node (Traefik) |
-| TCP 5060 | the media node |
+| TCP 5061 | the media node |
 | UDP 10000-10999 | the media node |
 
-Then set `voice.advertiseAddress` to your **public** IP. FreeSWITCH still
-binds the media node's own address, and the router forwards to it.
+Then set `voice.advertiseAddress` to your **public** IP, and point `host`
+at it too (SIP over TLS goes to `host`). FreeSWITCH still binds the media
+node's own address, and the router forwards to it.
 
 LAN clients then also use the public IP, so your router must support
 hairpin NAT (most do).
@@ -187,9 +195,24 @@ by `.github/workflows/server-images.yml`:
 
 To follow the development branch, set `image.tag: development` and `image.pullPolicy: Always`.
 
+## Clients before 0.4
+
+Those only speak plain SIP (TCP/UDP 5060): call setup, including the audio
+keys, crosses the network unencrypted, and routers with a "SIP ALG" tend to
+rewrite it. They're refused by default and told to update. To let them in
+while people update, set `voice.sip.plain.enabled: true` and open TCP+UDP
+5060; clients 0.4+ keep using TLS.
+
+## Hardening built in
+
+- Kamailio only accepts calls with short-lived credentials from voice-control
+  (one room, 5 minutes), never answers registrations, and hides its version.
+- More than ~30 requests in 2 seconds from one IP gets that IP ignored for 5
+  minutes; known SIP scanners are ignored outright.
+- FreeSWITCH and its Event Socket only listen on the node's loopback. Audio
+  must be SRTP: unencrypted calls are refused.
+
 ## Not in this chart yet
 
-- SIP over TLS (port 5061). Today call setup is plain TCP, so the audio
-  encryption keys can be read on the network path.
 - TURN relay for networks that block UDP.
 - More than one media node (rooms would be assigned to nodes).
