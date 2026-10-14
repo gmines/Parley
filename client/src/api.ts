@@ -199,6 +199,9 @@ export const api = {
   getConversation: (conversationId: string) => invoke<Conversation>("get_conversation", { conversationId }),
   openDm: (userId: string) => invoke<Conversation>("open_dm", { userId }),
   createGroup: (userIds: string[], name: string) => invoke<Conversation>("create_group", { userIds, name }),
+  addGroupMembers: (conversationId: string, userIds: string[]) =>
+    invoke<Conversation>("add_group_members", { conversationId, userIds }),
+  leaveGroup: (conversationId: string) => invoke<void>("leave_group", { conversationId }),
   listMessages: (conversationId: string, opts: { before?: string; after?: string } = {}) =>
     invoke<Message[]>("list_messages", { conversationId, before: opts.before ?? null, after: opts.after ?? null }),
   sendMessage: (conversationId: string, content: string, nonce: string) =>

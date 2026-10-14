@@ -306,6 +306,24 @@ pub async fn get_conversation(
     state.session.call(Method::GET, &path, None).await
 }
 
+/// Adds friends to a group (the server skips anyone already in it).
+#[tauri::command]
+pub async fn add_group_members(
+    state: State<'_, AppState>,
+    conversation_id: String,
+    user_ids: Vec<String>,
+) -> Result<Value> {
+    let ids = user_ids.iter().map(|u| id(u)).collect::<Result<Vec<_>>>()?;
+    let path = format!("v1/conversations/{}/members", id(&conversation_id)?);
+    state.session.call(Method::POST, &path, Some(json!({ "user_ids": ids }))).await
+}
+
+#[tauri::command]
+pub async fn leave_group(state: State<'_, AppState>, conversation_id: String) -> Result<()> {
+    let path = format!("v1/conversations/{}/members/me", id(&conversation_id)?);
+    state.session.call_empty(Method::DELETE, &path, None).await
+}
+
 #[tauri::command]
 pub async fn open_dm(state: State<'_, AppState>, user_id: String) -> Result<Value> {
     let body = json!({ "user_id": id(&user_id)? });

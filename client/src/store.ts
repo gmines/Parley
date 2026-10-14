@@ -56,6 +56,23 @@ export const store = {
     changed();
   },
 
+  /** conversation.updated: who's in it now. */
+  setMembers(conversationId: string, name: string | undefined, members: UserRef[]) {
+    const c = conversations.get(conversationId);
+    if (!c) {
+      api.getConversation(conversationId).then((full) => store.upsert(full)).catch(() => {});
+      return;
+    }
+    c.members = members;
+    c.name = name;
+    changed();
+  },
+
+  /** We left it. */
+  remove(conversationId: string) {
+    if (conversations.delete(conversationId)) changed();
+  },
+
   /** A new message arrived. `seen` = the user is looking at it right now. */
   addMessage(m: Message, seen: boolean) {
     const c = conversations.get(m.conversation_id);

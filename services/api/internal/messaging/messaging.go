@@ -42,6 +42,9 @@ var (
 	ErrGroupSize      = fmt.Errorf("a group needs 2 to %d other people", MaxGroupMembers-1)
 	ErrGroupName      = fmt.Errorf("group name must be at most %d printable characters", maxGroupName)
 	ErrBadMessageID   = errors.New("message not found in this conversation")
+	ErrNotGroup       = errors.New("only group conversations can change members")
+	ErrNoOneToAdd     = errors.New("pick at least one person to add")
+	ErrGroupFull      = fmt.Errorf("a group can have at most %d people", MaxGroupMembers)
 )
 
 // Graph is the part of the social module messaging depends on.
@@ -189,6 +192,123 @@ func (s *Service) CreateGroup(ctx context.Context, user uuid.UUID, memberIDs []u
 		s.announceConversation(ctx, conv)
 	}
 	return conv, err
+}
+
+// AddMembers adds friends of user to a group user is in. People already in it
+// are skipped; the group can't grow past MaxGroupMembers. New members see the
+// whole history but start with nothing unread.
+func (s *Service) AddMembers(ctx context.Context, user, conv uuid.UUID, memberIDs []uuid.UUID) (Conversation, error) {
+	others := slices.DeleteFunc(slices.Compact(slices.SortedFunc(slices.Values(memberIDs), uuidCompare)),
+		func(id uuid.UUID) bool { return id == user })
+	if len(others) == 0 {
+		return Conversation{}, ErrNoOneToAdd
+	}
+	for _, o := range others {
+		ok, err := s.graph.AreFriends(ctx, user, o)
+		if err != nil {
+			return Conversation{}, err
+		}
+		if !ok {
+			return Conversation{}, ErrNotFriends
+		}
+	}
+
+	var before []uuid.UUID
+	var added []uuid.UUID
+	err := pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
+		// Lock the conversation: concurrent adds can't overshoot the size limit.
+		var kind string
+		err := tx.QueryRow(ctx, `SELECT c.kind FROM conversations c
+			JOIN conversation_members m ON m.conversation_id = c.id AND m.user_id = $2
+			WHERE c.id = $1 FOR UPDATE OF c`, conv, user).Scan(&kind)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ErrNotFound
+		} else if err != nil {
+			return err
+		}
+		if kind != "group" {
+			return ErrNotGroup
+		}
+		rows, err := tx.Query(ctx, `SELECT user_id FROM conversation_members WHERE conversation_id = $1`, conv)
+		if err != nil {
+			return err
+		}
+		before, err = pgx.CollectRows(rows, pgx.RowTo[uuid.UUID])
+		if err != nil {
+			return err
+		}
+		added = slices.DeleteFunc(slices.Clone(others), func(id uuid.UUID) bool { return slices.Contains(before, id) })
+		if len(added) == 0 {
+			return nil
+		}
+		if len(before)+len(added) > MaxGroupMembers {
+			return ErrGroupFull
+		}
+		_, err = tx.Exec(ctx, `INSERT INTO conversation_members (conversation_id, user_id, last_read_message_id)
+			SELECT $1, u, (SELECT id FROM messages WHERE conversation_id = $1 ORDER BY id DESC LIMIT 1)
+			FROM unnest($2::uuid[]) AS u`, conv, added)
+		return err
+	})
+	if err != nil {
+		return Conversation{}, err
+	}
+	c, err := s.GetConversation(ctx, user, conv)
+	if err != nil || len(added) == 0 {
+		return c, err
+	}
+	s.announceMembers(ctx, c, before)
+	// The new members get the whole conversation, as if just created.
+	fresh := c
+	fresh.UnreadCount, fresh.LastReadMessageID = 0, nil
+	if c.LastMessage != nil {
+		fresh.LastReadMessageID = &c.LastMessage.ID
+	}
+	s.events.Publish(ctx, events.Event{Type: events.ConversationCreated, Recipients: added, Data: fresh})
+	return c, nil
+}
+
+// LeaveGroup removes user from a group. The last one out deletes it.
+func (s *Service) LeaveGroup(ctx context.Context, user, conv uuid.UUID) error {
+	var remaining []uuid.UUID
+	err := pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
+		var kind string
+		err := tx.QueryRow(ctx, `SELECT c.kind FROM conversations c
+			JOIN conversation_members m ON m.conversation_id = c.id AND m.user_id = $2
+			WHERE c.id = $1 FOR UPDATE OF c`, conv, user).Scan(&kind)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ErrNotFound
+		} else if err != nil {
+			return err
+		}
+		if kind != "group" {
+			return ErrNotGroup
+		}
+		if _, err := tx.Exec(ctx, `DELETE FROM conversation_members WHERE conversation_id = $1 AND user_id = $2`, conv, user); err != nil {
+			return err
+		}
+		rows, err := tx.Query(ctx, `SELECT user_id FROM conversation_members WHERE conversation_id = $1`, conv)
+		if err != nil {
+			return err
+		}
+		if remaining, err = pgx.CollectRows(rows, pgx.RowTo[uuid.UUID]); err != nil {
+			return err
+		}
+		if len(remaining) == 0 {
+			_, err = tx.Exec(ctx, `DELETE FROM conversations WHERE id = $1`, conv)
+		}
+		return err
+	})
+	if err != nil {
+		return err
+	}
+	s.events.Publish(ctx, events.Event{Type: events.ConversationRemoved, Recipients: []uuid.UUID{user},
+		Data: map[string]uuid.UUID{"conversation_id": conv}})
+	if len(remaining) > 0 {
+		if c, err := s.GetConversation(ctx, remaining[0], conv); err == nil {
+			s.announceMembers(ctx, c, remaining)
+		}
+	}
+	return nil
 }
 
 // Messages ------------------------------------------------------------------------
@@ -426,6 +546,19 @@ func (s *Service) announceConversation(ctx context.Context, c Conversation) {
 	// Per-user fields (unread, read marker) start empty for everyone.
 	c.UnreadCount, c.LastReadMessageID = 0, nil
 	s.events.Publish(ctx, events.Event{Type: events.ConversationCreated, Recipients: recipients, Data: c})
+}
+
+// MembersUpdate is the conversation.updated event: who's in it now (per-user
+// fields like unread counts don't change).
+type MembersUpdate struct {
+	ConversationID uuid.UUID        `json:"conversation_id"`
+	Name           string           `json:"name,omitempty"`
+	Members        []social.UserRef `json:"members"`
+}
+
+func (s *Service) announceMembers(ctx context.Context, c Conversation, recipients []uuid.UUID) {
+	s.events.Publish(ctx, events.Event{Type: events.ConversationUpdated, Recipients: recipients,
+		Data: MembersUpdate{ConversationID: c.ID, Name: c.Name, Members: c.Members}})
 }
 
 func isMember(ctx context.Context, q db.Querier, conv, user uuid.UUID) (bool, error) {

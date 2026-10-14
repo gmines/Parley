@@ -25,6 +25,8 @@ const (
 	FriendshipRemoved    = "friendship.removed"
 	ConversationCreated  = "conversation.created"
 	ConversationRead     = "conversation.read"
+	ConversationUpdated  = "conversation.updated" // members changed
+	ConversationRemoved  = "conversation.removed" // you left it
 	MessageCreated       = "message.created"
 	CallStarted          = "call.started"  // first person joined: other members' clients ring
 	CallUpdated          = "call.updated"  // participants changed

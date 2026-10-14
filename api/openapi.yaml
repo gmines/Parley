@@ -292,6 +292,39 @@ paths:
       responses:
         '200': { description: The conversation, content: { application/json: { schema: { $ref: '#/components/schemas/Conversation' } } } }
         '404': { $ref: '#/components/responses/Error' }
+  /v1/conversations/{convID}/members:
+    post:
+      summary: Add friends to a group
+      description: >
+        Any member can add their own friends, up to 10 people in all (409
+        group_full). People already in the group are skipped. New members see
+        the history, with nothing unread. DMs can't change members (400
+        not_group): start a group instead. Members get `conversation.updated`,
+        the new ones `conversation.created`.
+      parameters: [{ $ref: '#/components/parameters/ConvID' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, required: [user_ids], properties: { user_ids: { type: array, items: { type: string, format: uuid } } } }
+      responses:
+        '200': { description: The group, content: { application/json: { schema: { $ref: '#/components/schemas/Conversation' } } } }
+        '400': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+  /v1/conversations/{convID}/members/me:
+    delete:
+      summary: Leave a group
+      description: >
+        The last member to leave deletes the group. Your connections get
+        `conversation.removed`, the others `conversation.updated`. DMs can't be
+        left (400 not_group).
+      parameters: [{ $ref: '#/components/parameters/ConvID' }]
+      responses:
+        '204': { description: Left }
+        '400': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
   /v1/conversations/{convID}/messages:
     parameters: [{ $ref: '#/components/parameters/ConvID' }]
     get:

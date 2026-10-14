@@ -148,7 +148,11 @@ function showApp(initialUser: User) {
       }),
     );
   }
-  const unsubscribeStore = store.subscribe(renderDmList);
+  const unsubscribeStore = store.subscribe(() => {
+    // Left the open group (here or on another device): nothing to show.
+    if (page.kind === "conversation" && !store.get(page.id)) go({ kind: "friends" });
+    else renderDmList();
+  });
   const unsubscribeVoice = voice.subscribe(renderDmList);
 
   // Pages --------------------------------------------------------------------------
@@ -184,7 +188,7 @@ function showApp(initialUser: User) {
     } else {
       const c = store.get(page.id);
       if (c) {
-        conversation = conversationView(c, signedOut);
+        conversation = conversationView(c, signedOut, (g) => go({ kind: "conversation", id: g.id }));
         pane.replaceChildren(conversation.el);
       }
     }
@@ -226,7 +230,22 @@ function showApp(initialUser: User) {
       }
       case "conversation.created":
         store.upsert(e.data as Conversation);
+        // We may have been added to a group with a call already going.
+        voice.resync();
         break;
+      case "conversation.updated": {
+        const id = e.data.conversation_id as string;
+        store.setMembers(id, e.data.name || undefined, e.data.members);
+        const c = store.get(id);
+        if (c && conversation?.id === id) conversation.update(c);
+        break;
+      }
+      case "conversation.removed": {
+        const id = e.data.conversation_id as string;
+        if (voice.inCall(id)) voice.leave().catch(() => {});
+        store.remove(id);
+        break;
+      }
       case "conversation.read":
         store.markRead(e.data.conversation_id, e.data.last_read_message_id);
         break;

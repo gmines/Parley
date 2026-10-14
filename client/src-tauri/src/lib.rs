@@ -63,6 +63,8 @@ pub fn run() {
             commands::get_conversation,
             commands::open_dm,
             commands::create_group,
+            commands::add_group_members,
+            commands::leave_group,
             commands::list_messages,
             commands::send_message,
             commands::mark_read,

@@ -70,6 +70,8 @@ func (s *Server) Handler() http.Handler {
 	authed.Handle("POST /v1/conversations/dm", httpx.Handler(s.openDM))
 	authed.Handle("POST /v1/conversations/group", httpx.Handler(s.createGroup))
 	authed.Handle("GET /v1/conversations/{convID}", httpx.Handler(s.getConversation))
+	authed.Handle("POST /v1/conversations/{convID}/members", httpx.Handler(s.addMembers))
+	authed.Handle("DELETE /v1/conversations/{convID}/members/me", httpx.Handler(s.leaveGroup))
 	authed.Handle("GET /v1/conversations/{convID}/messages", httpx.Handler(s.listMessages))
 	authed.Handle("POST /v1/conversations/{convID}/messages", httpx.Handler(s.sendMessage))
 	authed.Handle("POST /v1/conversations/{convID}/read", httpx.Handler(s.markRead))
@@ -163,6 +165,9 @@ func mapErr(err error) error {
 		messaging.ErrGroupSize:         {http.StatusBadRequest, "group_size"},
 		messaging.ErrGroupName:         {http.StatusBadRequest, "group_name"},
 		messaging.ErrBadMessageID:      {http.StatusBadRequest, "bad_message_id"},
+		messaging.ErrNotGroup:          {http.StatusBadRequest, "not_group"},
+		messaging.ErrNoOneToAdd:        {http.StatusBadRequest, "no_one_to_add"},
+		messaging.ErrGroupFull:         {http.StatusConflict, "group_full"},
 	}
 	if locked := (*identity.LockedError)(nil); errors.As(err, &locked) {
 		e := httpx.NewError(http.StatusTooManyRequests, "too_many_attempts", locked.Error())

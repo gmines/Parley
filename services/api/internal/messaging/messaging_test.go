@@ -300,3 +300,132 @@ func TestMessageValidation(t *testing.T) {
 		t.Fatalf("max length (multi-byte) rejected: %v", err)
 	}
 }
+
+func TestGroupMembership(t *testing.T) {
+	f := setup(t, "alice", "bob", "carol", "dave", "erin", "stranger")
+	ctx := context.Background()
+	for _, n := range []string{"bob", "carol", "dave", "erin"} {
+		f.befriend(t, "alice", n)
+	}
+	f.befriend(t, "bob", "erin")
+	u := f.users
+	g, err := f.svc.CreateGroup(ctx, u["alice"], []uuid.UUID{u["bob"], u["carol"]}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	last := f.send(t, "bob", g.ID, "before dave")
+
+	// Only friends of the adder; DMs can't change members; outsiders can't add.
+	if _, err := f.svc.AddMembers(ctx, u["alice"], g.ID, []uuid.UUID{u["stranger"]}); !errors.Is(err, ErrNotFriends) {
+		t.Fatalf("add non-friend err = %v", err)
+	}
+	if _, err := f.svc.AddMembers(ctx, u["alice"], g.ID, nil); !errors.Is(err, ErrNoOneToAdd) {
+		t.Fatalf("add nobody err = %v", err)
+	}
+	if _, err := f.svc.AddMembers(ctx, u["dave"], g.ID, []uuid.UUID{u["alice"]}); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("non-member add err = %v", err)
+	}
+	dm, err := f.svc.OpenDM(ctx, u["alice"], u["bob"])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.svc.AddMembers(ctx, u["alice"], dm.ID, []uuid.UUID{u["carol"]}); !errors.Is(err, ErrNotGroup) {
+		t.Fatalf("add to DM err = %v", err)
+	}
+
+	before := len(f.rec.Events())
+	c, err := f.svc.AddMembers(ctx, u["alice"], g.ID, []uuid.UUID{u["dave"], u["bob"]}) // bob is already in
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(c.Members) != 4 {
+		t.Fatalf("members = %d, want 4", len(c.Members))
+	}
+	evs := f.rec.Events()[before:]
+	if len(evs) != 2 || evs[0].Type != events.ConversationUpdated || len(evs[0].Recipients) != 3 ||
+		evs[1].Type != events.ConversationCreated || len(evs[1].Recipients) != 1 || evs[1].Recipients[0] != u["dave"] {
+		t.Fatalf("events = %+v", evs)
+	}
+	// Dave sees the history but nothing unread; then new messages count.
+	dc, err := f.svc.GetConversation(ctx, u["dave"], g.ID)
+	if err != nil || dc.UnreadCount != 0 || dc.LastReadMessageID == nil || *dc.LastReadMessageID != last.ID {
+		t.Fatalf("dave's view = %+v, %v", dc, err)
+	}
+	if msgs, err := f.svc.ListMessages(ctx, u["dave"], g.ID, nil, nil, 10); err != nil || len(msgs) != 1 {
+		t.Fatalf("dave's history = %d, %v", len(msgs), err)
+	}
+	f.send(t, "carol", g.ID, "hi dave")
+	if dc, _ := f.svc.GetConversation(ctx, u["dave"], g.ID); dc.UnreadCount != 1 {
+		t.Fatalf("dave unread = %d", dc.UnreadCount)
+	}
+	// Any member can add their own friends.
+	if _, err := f.svc.AddMembers(ctx, u["bob"], g.ID, []uuid.UUID{u["erin"]}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Leaving: DMs can't be left; the leaver loses access; the last one out deletes it.
+	if err := f.svc.LeaveGroup(ctx, u["alice"], dm.ID); !errors.Is(err, ErrNotGroup) {
+		t.Fatalf("leave DM err = %v", err)
+	}
+	before = len(f.rec.Events())
+	if err := f.svc.LeaveGroup(ctx, u["dave"], g.ID); err != nil {
+		t.Fatal(err)
+	}
+	evs = f.rec.Events()[before:]
+	if len(evs) != 2 || evs[0].Type != events.ConversationRemoved || evs[0].Recipients[0] != u["dave"] ||
+		evs[1].Type != events.ConversationUpdated || len(evs[1].Recipients) != 4 {
+		t.Fatalf("leave events = %+v", evs)
+	}
+	if _, err := f.svc.GetConversation(ctx, u["dave"], g.ID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("dave after leaving err = %v", err)
+	}
+	if err := f.svc.LeaveGroup(ctx, u["dave"], g.ID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("leave twice err = %v", err)
+	}
+	for _, n := range []string{"alice", "bob", "carol", "erin"} {
+		if err := f.svc.LeaveGroup(ctx, u[n], g.ID); err != nil {
+			t.Fatalf("%s leave: %v", n, err)
+		}
+	}
+	if _, err := f.svc.ListMessages(ctx, u["alice"], g.ID, nil, nil, 10); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("deleted group err = %v", err)
+	}
+}
+
+func TestGroupSizeLimitOnAdd(t *testing.T) {
+	names := []string{"owner"}
+	for i := range MaxGroupMembers + 1 {
+		names = append(names, fmt.Sprintf("friend%d", i))
+	}
+	f := setup(t, names...)
+	ctx := context.Background()
+	var ids []uuid.UUID
+	for _, n := range names[1:] {
+		f.befriend(t, "owner", n)
+		ids = append(ids, f.users[n])
+	}
+	g, err := f.svc.CreateGroup(ctx, f.users["owner"], ids[:MaxGroupMembers-2], "") // one slot left
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.svc.AddMembers(ctx, f.users["owner"], g.ID, ids[MaxGroupMembers-2:]); !errors.Is(err, ErrGroupFull) {
+		t.Fatalf("overfill err = %v", err)
+	}
+	// Concurrent adds of the last slot: exactly one wins.
+	var wg sync.WaitGroup
+	errs := make([]error, 2)
+	for i := range 2 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, errs[i] = f.svc.AddMembers(ctx, f.users["owner"], g.ID, []uuid.UUID{ids[MaxGroupMembers-2+i]})
+		}()
+	}
+	wg.Wait()
+	if (errs[0] == nil) == (errs[1] == nil) {
+		t.Fatalf("concurrent adds: %v / %v, want exactly one success", errs[0], errs[1])
+	}
+	if c, _ := f.svc.GetConversation(ctx, f.users["owner"], g.ID); len(c.Members) != MaxGroupMembers {
+		t.Fatalf("members = %d, want %d", len(c.Members), MaxGroupMembers)
+	}
+}

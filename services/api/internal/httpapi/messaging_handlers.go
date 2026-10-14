@@ -77,6 +77,37 @@ func (s *Server) createGroup(w http.ResponseWriter, r *http.Request) error {
 	return nil
 }
 
+func (s *Server) addMembers(w http.ResponseWriter, r *http.Request) error {
+	id, err := pathUUID(r, "convID")
+	if err != nil {
+		return err
+	}
+	var body struct {
+		UserIDs []uuid.UUID `json:"user_ids"`
+	}
+	if err := httpx.DecodeJSON(w, r, &body); err != nil {
+		return err
+	}
+	c, err := s.Messaging.AddMembers(r.Context(), caller(r), id, body.UserIDs)
+	if err != nil {
+		return mapErr(err)
+	}
+	httpx.WriteJSON(w, http.StatusOK, c)
+	return nil
+}
+
+func (s *Server) leaveGroup(w http.ResponseWriter, r *http.Request) error {
+	id, err := pathUUID(r, "convID")
+	if err != nil {
+		return err
+	}
+	if err := s.Messaging.LeaveGroup(r.Context(), caller(r), id); err != nil {
+		return mapErr(err)
+	}
+	w.WriteHeader(http.StatusNoContent)
+	return nil
+}
+
 func (s *Server) listMessages(w http.ResponseWriter, r *http.Request) error {
 	id, err := pathUUID(r, "convID")
 	if err != nil {

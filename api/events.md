@@ -15,6 +15,8 @@ conversations. Source of truth for type names: `pkg/events/events.go`.
 | `ready` | the connecting client | `{"user_id": "<uuid>"}` |
 | `message.created` | every conversation member | `Message` (plus the sender's `nonce`) |
 | `conversation.created` | every member | `Conversation` (unread fields empty) |
+| `conversation.updated` | every member (not the ones just added) | `{"conversation_id", "name", "members"}`: who's in it now; keep your own unread fields |
+| `conversation.removed` | your own connections, after you leave a group | `{"conversation_id": "<uuid>"}` |
 | `conversation.read` | the reader's own connections | `{"conversation_id", "last_read_message_id"}` |
 | `friend_request.created` | sender and recipient | `FriendRequest` |
 | `friend_request.removed` | both users | `{"id": "<request uuid>"}` (accepted, declined, cancelled or cleared by a block) |

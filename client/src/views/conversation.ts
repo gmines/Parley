@@ -1,7 +1,8 @@
 import { api, errorCode, errorMessage, type Conversation, type Message } from "../api";
-import { avatar, h } from "../dom";
+import { avatar, confirmDialog, h, toast } from "../dom";
 import { conversationTitle, dmPeer, store } from "../store";
-import { callControl, disposeWidget } from "../voice";
+import { callControl, disposeWidget, voice } from "../voice";
+import { addToGroupDialog, dmToGroupDialog } from "./newgroup";
 
 const MAX_CHARS = 4000;
 const GROUP_GAP_MS = 5 * 60 * 1000; // consecutive messages within this merge under one header
@@ -17,19 +18,61 @@ export interface ConversationView {
   addMessage(m: Message): void;
   /** After a reconnect: fetch anything missed. */
   resync(): void;
+  /** Members or name changed. */
+  update(c: Conversation): void;
   dispose(): void;
 }
 
-export function conversationView(conv: Conversation, onSignedOut: (msg: string) => void): ConversationView {
+export function conversationView(
+  conv: Conversation,
+  onSignedOut: (msg: string) => void,
+  open: (c: Conversation) => void,
+): ConversationView {
   const me = store.me()!;
   let items: Item[] = [];
   let hasOlder = true;
   let loadingOlder = false;
   let lastMarked = "";
 
-  const title = h("h1", { text: conversationTitle(conv) });
+  const title = h("h1");
   const call = callControl(conv.id);
   const subtitle = h("span", { class: "conv-sub" });
+  const addPeople = h("button", {
+    class: "btn btn-sm btn-ghost",
+    text: "Add people",
+    attrs: { type: "button", title: "Add friends to this conversation" },
+    on: {
+      click: async () => {
+        const peer = dmPeer(conv);
+        const c = await (peer ? dmToGroupDialog(peer) : addToGroupDialog(conv)).catch((e) => (toast(errorMessage(e), "error"), null));
+        if (!c) return;
+        store.upsert(c);
+        if (c.id !== conv.id) open(c); // a DM became a new group
+      },
+    },
+  });
+  const leave = h("button", {
+    class: "btn btn-sm btn-ghost btn-danger-text",
+    text: "Leave",
+    attrs: { type: "button", title: "Leave this group" },
+    on: {
+      click: async () => {
+        const ok = await confirmDialog(
+          `Leave ${conversationTitle(conv)}?`,
+          "You won't get its messages any more, and someone in it would have to add you back.",
+          "Leave group",
+        );
+        if (!ok) return;
+        try {
+          if (voice.inCall(conv.id)) await voice.leave();
+          await api.leaveGroup(conv.id);
+          store.remove(conv.id); // the realtime event does the same; this is quicker
+        } catch (e) {
+          toast(errorMessage(e), "error");
+        }
+      },
+    },
+  });
   const list = h("div", { class: "messages", attrs: { role: "log", "aria-live": "polite" } });
   const banner = h("p", { class: "composer-error", attrs: { role: "alert" } });
   const input = h("textarea", { class: "composer-input", attrs: { rows: "1", maxlength: String(MAX_CHARS) } });
@@ -37,14 +80,20 @@ export function conversationView(conv: Conversation, onSignedOut: (msg: string) 
   const el = h(
     "div",
     { class: "main conversation" },
-    h("header", { class: "main-header" }, title, subtitle, h("div", { class: "spacer" }), call),
+    h("header", { class: "main-header" }, title, subtitle, h("div", { class: "spacer" }), addPeople, leave, call),
     list,
     h("form", { class: "composer" }, banner, h("div", { class: "composer-row" }, input, counter)),
   );
 
-  const peer = dmPeer(conv);
-  subtitle.textContent = peer ? `@${peer.username}` : `${conv.members.length} members`;
-  input.placeholder = `Message ${peer ? "@" + peer.username : conversationTitle(conv)}`;
+  function renderHeader() {
+    const peer = dmPeer(conv);
+    title.textContent = conversationTitle(conv);
+    subtitle.textContent = peer ? `@${peer.username}` : `${conv.members.length} members`;
+    subtitle.title = peer ? "" : conv.members.map((m) => m.display_name).join(", ");
+    input.placeholder = `Message ${peer ? "@" + peer.username : conversationTitle(conv)}`;
+    leave.hidden = conv.kind !== "group";
+  }
+  renderHeader();
 
   // Rendering -----------------------------------------------------------------
 
@@ -269,6 +318,10 @@ export function conversationView(conv: Conversation, onSignedOut: (msg: string) 
       if (stick) maybeMarkRead();
     },
     resync,
+    update(c: Conversation) {
+      conv = c;
+      renderHeader();
+    },
     dispose() {
       disposeWidget(call);
       window.removeEventListener("focus", onFocus);
