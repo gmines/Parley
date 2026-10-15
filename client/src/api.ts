@@ -144,6 +144,12 @@ export interface SavedLogin {
 }
 
 /** This client build (see the About page). */
+export interface BackgroundSetting {
+  enabled: boolean;
+  /** False when a closed window couldn't be brought back (no tray icon). */
+  available: boolean;
+}
+
 export interface AppInfo {
   version: string;
   commit: string;
@@ -203,6 +209,8 @@ export const api = {
   realtimeStart: () => invoke<void>("realtime_start"),
   appInfo: () => invoke<AppInfo>("app_info"),
   openLogs: () => invoke<void>("open_logs"),
+  backgroundSetting: () => invoke<BackgroundSetting>("background_setting"),
+  setBackground: (enabled: boolean) => invoke<void>("set_background", { enabled }),
   serverMeta: (server: string) => invoke<ServerMeta>("server_meta", { server }),
   listConversations: () => invoke<Conversation[]>("list_conversations"),
   getConversation: (conversationId: string) => invoke<Conversation>("get_conversation", { conversationId }),

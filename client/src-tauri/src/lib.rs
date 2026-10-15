@@ -7,12 +7,16 @@ mod secrets;
 mod session;
 mod voice;
 pub mod voice_engine;
+mod window;
 
 use tauri::Manager;
 use tauri_plugin_log::{RotationStrategy, Target, TargetKind, TimezoneStrategy};
 
 pub fn run() {
     tauri::Builder::default()
+        // Launching Parley again shows the running one (its window may be
+        // hidden in the background). Must be the first plugin.
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| window::show_main(app)))
         // Logs go to the OS log folder (About → Open logs folder), so testers
         // can send them with a bug report.
         .plugin(
@@ -48,8 +52,11 @@ pub fn run() {
                 realtime: realtime::Realtime::default(),
                 voice: voice::Voice::default(),
             });
+            #[cfg(not(target_os = "macos"))]
+            window::setup_tray(app);
             Ok(())
         })
+        .on_window_event(window::on_window_event)
         .invoke_handler(tauri::generate_handler![
             commands::saved_server,
             commands::saved_login,
@@ -92,6 +99,8 @@ pub fn run() {
             commands::app_info,
             commands::server_meta,
             commands::open_logs,
+            window::background_setting,
+            window::set_background,
             commands::list_conversations,
             commands::get_conversation,
             commands::open_dm,
@@ -104,9 +113,11 @@ pub fn run() {
         ])
         .build(tauri::generate_context!())
         .expect("error while building Parley")
-        .run(|_app, event| {
-            if let tauri::RunEvent::Exit = event {
-                voice::shutdown();
-            }
+        .run(|_app, event| match event {
+            tauri::RunEvent::Exit => voice::shutdown(),
+            // Dock icon clicked while the window is hidden.
+            #[cfg(target_os = "macos")]
+            tauri::RunEvent::Reopen { has_visible_windows: false, .. } => window::show_main(_app),
+            _ => {}
         });
 }

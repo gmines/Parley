@@ -60,8 +60,13 @@ async fn run(app: AppHandle) {
     loop {
         status(&app, "connecting");
         let session = &app.state::<AppState>().session;
+        let me = session.current_user().await.map(|u| u.id);
         let on_connected = || status(&app, "connected");
         let on_event = |event: serde_json::Value| {
+            // Someone's calling: show the window if it's in the background.
+            if event["type"] == "call.started" && event["data"]["started_by"].as_str() != me.as_deref() {
+                crate::window::incoming_call(&app);
+            }
             let _ = app.emit("realtime-event", event);
         };
         match connect_once(session, on_connected, on_event).await {

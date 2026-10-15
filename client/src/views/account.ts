@@ -21,7 +21,7 @@ export function accountView(
     "div",
     { class: "main" },
     h("header", { class: "main-header" }, h("h1", { text: "Account" })),
-    h("section", { class: "content settings" }, profileSection(), passwordSection(), recovery),
+    h("section", { class: "content settings" }, profileSection(), passwordSection(), recovery, backgroundSection()),
   );
 
   function setUser(u: User) {
@@ -43,6 +43,41 @@ export function accountView(
       h("h2", { text: "Profile" }),
       h("dl", { class: "kv" }, h("dt", { text: "Display name" }), h("dd", { text: user.display_name }), h("dt", { text: "Username" }), h("dd", { text: `@${user.username}` })),
     );
+  }
+
+  /** "Keep Parley running when the window is closed" (this computer only). */
+  function backgroundSection() {
+    const box = h("input", { attrs: { type: "checkbox", id: "f-background" } });
+    const hint = h("p", { class: "hint" });
+    const section = h(
+      "section",
+      { class: "settings-section" },
+      h("h2", { text: "This computer" }),
+      h("label", { class: "check", attrs: { for: "f-background" } }, box, h("span", { text: "Keep Parley running when the window is closed" })),
+      hint,
+    );
+    section.hidden = true;
+    const mac = navigator.userAgent.includes("Mac");
+    const explain = (on: boolean) =>
+      (hint.textContent = on
+        ? mac
+          ? "You'll still get calls and messages. Click Parley in the Dock to bring it back; quit with Parley → Quit Parley (⌘Q)."
+          : "You'll still get calls and messages. Click the Parley icon in the system tray to bring it back, or right-click it to quit."
+        : "Closing the window quits Parley.");
+    api
+      .backgroundSetting()
+      .then((s) => {
+        if (!s.available) return; // no tray icon: closing always quits
+        box.checked = s.enabled;
+        explain(s.enabled);
+        section.hidden = false;
+      })
+      .catch(() => {});
+    box.addEventListener("change", () => {
+      explain(box.checked);
+      api.setBackground(box.checked).catch((e) => toast(errorMessage(e), "error"));
+    });
+    return section;
   }
 
   function passwordSection() {
