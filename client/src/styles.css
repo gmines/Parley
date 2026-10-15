@@ -501,3 +501,15 @@ input:focus { outline: none; border-color: var(--accent); }
   animation: ring-in 0.18s ease-out;
 }
 @keyframes ring-in { from { transform: translateY(-8px); opacity: 0; } to { transform: none; opacity: 1; } }
+
+/* Checkbox with its label ("Stay signed in", "Hear yourself"). */
+.check { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--text-2); cursor: pointer; }
+.check input { width: auto; margin: 0; }
+
+/* Audio settings: microphone level meter. */
+.audio-panel { display: flex; flex-direction: column; gap: 10px; }
+.meter { height: 8px; border-radius: 4px; background: var(--surface-2); border: 1px solid var(--border); overflow: hidden; }
+.meter-fill { height: 100%; width: 0; background: var(--ok); transition: width 80ms linear; }
+.audio-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px; }
+.meter-off { opacity: 0.5; }
+.form-actions-start { justify-content: flex-start; }

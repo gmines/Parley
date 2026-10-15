@@ -42,6 +42,26 @@ static int g_null_audio;
 static pj_pool_t *g_tone_pool;
 static pjmedia_port *g_tone_gen;
 static pjmedia_snd_port *g_tone_snd;
+/* Audio test (pv_audio_test): the mic feeds a null port so the bridge keeps
+ * the device open and measures its level. */
+static int g_test_mode;
+static pj_pool_t *g_test_pool;
+static pjsua_conf_port_id g_test_slot = PJSUA_INVALID_ID;
+static char g_last_error[256];
+
+static void set_error(const char *what, pj_status_t st) {
+    char msg[160];
+    pj_strerror(st, msg, sizeof(msg));
+    pj_ansi_snprintf(g_last_error, sizeof(g_last_error), "%s: %s", what, msg);
+    PJ_LOG(1, (THIS_FILE, "%s", g_last_error));
+}
+
+static pj_status_t open_sound(void);
+static void audio_test_stop(void);
+
+void pv_last_error(char *buf, int len) {
+    if (buf && len > 0) pj_ansi_snprintf(buf, len, "%s", g_last_error);
+}
 
 /* pjsua requires every calling thread to be registered with pjlib. */
 static void ensure_thread(void) {
@@ -264,6 +284,7 @@ void pv_shutdown(void) {
     if (!g_started) return;
     ensure_thread();
     tone_stop();
+    audio_test_stop();
     pjsua_call_hangup_all();
     pjsua_destroy();
     g_started = 0;
@@ -279,12 +300,17 @@ int pv_join(const pv_join_params *p) {
     if (!g_started) return -1;
     ensure_thread();
     if (g_call != PJSUA_INVALID_ID) return -2; /* already in a call */
+    g_last_error[0] = 0;
+    tone_stop();
+    audio_test_stop();
+    if (open_sound() != PJ_SUCCESS) return -5;
     if (g_acc != PJSUA_INVALID_ID) {
         pjsua_acc_del(g_acc);
         g_acc = PJSUA_INVALID_ID;
     }
 
     char id[256], proxy[256];
+    pj_status_t st;
     pj_ansi_snprintf(id, sizeof(id), "sip:%s@%s", p->identity, p->realm);
     pj_ansi_snprintf(proxy, sizeof(proxy), "%s;lr", p->proxy);
 
@@ -309,14 +335,20 @@ int pv_join(const pv_join_params *p) {
      * two, and the server can't mis-latch a separate RTCP port. */
     acc.enable_rtcp_mux = PJ_TRUE;
 
-    if (pjsua_acc_add(&acc, PJ_FALSE, &g_acc) != PJ_SUCCESS) return -3;
+    st = pjsua_acc_add(&acc, PJ_FALSE, &g_acc);
+    if (st != PJ_SUCCESS) {
+        set_error("couldn't set up the call", st);
+        return -3;
+    }
 
     pjsua_call_setting opt;
     pjsua_call_setting_default(&opt);
     opt.aud_cnt = 1;
     opt.vid_cnt = 0;
     pj_str_t uri = pj_str((char *)p->room_uri);
-    if (pjsua_call_make_call(g_acc, &uri, &opt, NULL, NULL, &g_call) != PJ_SUCCESS) {
+    st = pjsua_call_make_call(g_acc, &uri, &opt, NULL, NULL, &g_call);
+    if (st != PJ_SUCCESS) {
+        set_error("couldn't place the call", st);
         pjsua_acc_del(g_acc);
         g_acc = PJSUA_INVALID_ID;
         g_call = PJSUA_INVALID_ID;
@@ -405,7 +437,89 @@ int pv_set_devices(int capture, int playback) {
     ensure_thread();
     if (capture < 0) capture = PJMEDIA_AUD_DEFAULT_CAPTURE_DEV;
     if (playback < 0) playback = PJMEDIA_AUD_DEFAULT_PLAYBACK_DEV;
-    return pjsua_set_snd_dev(capture, playback) == PJ_SUCCESS ? 0 : -2;
+    pjsua_snd_dev_param prm;
+    pjsua_snd_dev_param_default(&prm);
+    prm.capture_dev = capture;
+    prm.playback_dev = playback;
+    /* Don't open the microphone just to remember the choice. */
+    if (g_call == PJSUA_INVALID_ID && !g_test_mode) prm.mode |= PJSUA_SND_DEV_NO_IMMEDIATE_OPEN;
+    pj_status_t st = pjsua_set_snd_dev2(&prm);
+    if (st != PJ_SUCCESS) {
+        set_error("couldn't open the selected audio devices", st);
+        return -2;
+    }
+    return 0;
+}
+
+/* Opens the selected sound devices (what pjsua_call_make_call would do),
+ * falling back to the system defaults if they can't be opened (unplugged,
+ * in use, or no longer supporting our format), so a stale choice can't
+ * stop calls. */
+static pj_status_t open_sound(void) {
+    int cap, play;
+    pj_status_t st;
+    if (g_null_audio || pjsua_snd_is_active()) return PJ_SUCCESS;
+    if (pjsua_get_snd_dev(&cap, &play) != PJ_SUCCESS) {
+        cap = PJMEDIA_AUD_DEFAULT_CAPTURE_DEV;
+        play = PJMEDIA_AUD_DEFAULT_PLAYBACK_DEV;
+    }
+    st = pjsua_set_snd_dev(cap, play);
+    if (st != PJ_SUCCESS && (cap != PJMEDIA_AUD_DEFAULT_CAPTURE_DEV || play != PJMEDIA_AUD_DEFAULT_PLAYBACK_DEV)) {
+        PJ_LOG(2, (THIS_FILE, "selected audio devices (%d, %d) failed to open, trying the defaults", cap, play));
+        st = pjsua_set_snd_dev(PJMEDIA_AUD_DEFAULT_CAPTURE_DEV, PJMEDIA_AUD_DEFAULT_PLAYBACK_DEV);
+    }
+    if (st != PJ_SUCCESS) set_error("couldn't open the microphone or speaker", st);
+    return st;
+}
+
+static void audio_test_stop(void) {
+    if (g_test_slot != PJSUA_INVALID_ID) {
+        pjsua_conf_disconnect(0, 0);
+        pjsua_conf_remove_port(g_test_slot);
+        g_test_slot = PJSUA_INVALID_ID;
+    }
+    if (g_test_pool) {
+        pj_pool_release(g_test_pool);
+        g_test_pool = NULL;
+    }
+    g_test_mode = PV_AUDIO_TEST_OFF;
+}
+
+int pv_audio_test(int mode) {
+    if (!g_started) return -1;
+    ensure_thread();
+    if (g_call != PJSUA_INVALID_ID) return mode == PV_AUDIO_TEST_OFF ? 0 : -2;
+    audio_test_stop();
+    if (mode == PV_AUDIO_TEST_OFF) return 0;
+    if (g_null_audio) return -3;
+    g_last_error[0] = 0;
+    if (open_sound() != PJ_SUCCESS) return -4;
+
+    pjmedia_port *sink;
+    pj_status_t st;
+    g_test_pool = pjsua_pool_create("audiotest", 512, 512);
+    if (!g_test_pool) return -4;
+    st = pjmedia_null_port_create(g_test_pool, PV_SND_RATE, 1, PV_SND_RATE / 50, 16, &sink);
+    if (st == PJ_SUCCESS) st = pjsua_conf_add_port(g_test_pool, sink, &g_test_slot);
+    if (st == PJ_SUCCESS) st = pjsua_conf_connect(0, g_test_slot);
+    if (st == PJ_SUCCESS && mode == PV_AUDIO_TEST_LOOPBACK) st = pjsua_conf_connect(0, 0);
+    if (st != PJ_SUCCESS) {
+        set_error("couldn't start the audio test", st);
+        audio_test_stop();
+        return -4;
+    }
+    g_test_mode = mode;
+    return 0;
+}
+
+int pv_mic_level(void) {
+    unsigned tx = 0, rx = 0;
+    if (!g_started) return 0;
+    ensure_thread();
+    if (!pjsua_snd_is_active() || pjsua_conf_get_signal_level(0, &tx, &rx) != PJ_SUCCESS) return 0;
+    /* While muted in a call the bridge still reads the mic: show it anyway,
+     * it's what the microphone hears. */
+    return (int)rx;
 }
 
 /* Ring tones, generated (no audio files) and played on an output-only stream

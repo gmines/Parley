@@ -156,8 +156,11 @@ func TestAuthEndpoints(t *testing.T) {
 
 	var next identity.Session
 	anon.do("POST", "/v1/auth/refresh", map[string]string{"refresh_token": sess.RefreshToken}, 200, &next)
-	anon.do("POST", "/v1/auth/refresh", map[string]string{"refresh_token": sess.RefreshToken}, 401, nil)
+	// A retry (the response was lost) gets a new session while the first replacement is unused.
+	anon.do("POST", "/v1/auth/refresh", map[string]string{"refresh_token": sess.RefreshToken}, 200, &next)
 	anon.do("POST", "/v1/auth/logout", map[string]string{"refresh_token": next.RefreshToken}, 204, nil)
+	anon.do("POST", "/v1/auth/refresh", map[string]string{"refresh_token": next.RefreshToken}, 401, nil)
+	anon.do("POST", "/v1/auth/refresh", map[string]string{"refresh_token": sess.RefreshToken}, 401, nil)
 
 	// Access tokens are stateless and stay valid until expiry.
 	c.do("GET", "/v1/users/me", nil, 200, nil)

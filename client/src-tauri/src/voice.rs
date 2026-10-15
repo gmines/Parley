@@ -12,7 +12,7 @@ use url::Url;
 
 use crate::commands::AppState;
 use crate::error::{AppError, Result};
-use crate::voice_engine::{CallState, Device, Engine, EngineEvent, SipCredentials, Stats, Tone};
+use crate::voice_engine::{AudioTest, CallState, Device, Engine, EngineEvent, SipCredentials, Stats, Tone};
 
 #[derive(Default)]
 pub struct Voice {
@@ -41,6 +41,7 @@ fn engine(app: &AppHandle) -> Result<&'static Engine> {
         EngineEvent::Log { level, text } => match level {
             0 | 1 => log::error!("voice: {text}"),
             2 => log::warn!("voice: {text}"),
+            3 => log::info!("voice: {text}"),
             _ => log::debug!("voice: {text}"),
         },
         EngineEvent::Call { state, status, reason } => {
@@ -177,6 +178,19 @@ pub fn voice_set_devices(app: AppHandle, capture: Option<i32>, playback: Option<
 #[tauri::command]
 pub fn voice_tone(app: AppHandle, tone: Option<Tone>, playback: Option<i32>) -> Result<()> {
     engine(&app)?.tone(tone, playback).map_err(internal)
+}
+
+/// Audio settings test: "meter" opens the microphone (see voice_mic_level),
+/// "loopback" also plays it back; null stops it.
+#[tauri::command]
+pub fn voice_audio_test(app: AppHandle, mode: Option<AudioTest>) -> Result<()> {
+    engine(&app)?.audio_test(mode).map_err(internal)
+}
+
+/// The microphone's level, 0-255.
+#[tauri::command]
+pub fn voice_mic_level(app: AppHandle) -> Result<i32> {
+    Ok(engine(&app)?.mic_level())
 }
 
 /// Declines a ringing call (the others' clients stop ringing for us).

@@ -136,6 +136,13 @@ export function onVoiceEvent(fn: (e: VoiceEvent) => void): Promise<UnlistenFn> {
   return listen<VoiceEvent>("voice-event", (e) => fn(e.payload));
 }
 
+/** What the login form starts with. */
+export interface SavedLogin {
+  server: string | null;
+  username: string | null;
+  stay_signed_in: boolean;
+}
+
 /** This client build (see the About page). */
 export interface AppInfo {
   version: string;
@@ -172,11 +179,12 @@ export function errorCode(e: unknown): string | undefined {
 // Tauri maps camelCase argument names here to the snake_case Rust parameters.
 export const api = {
   savedServer: () => invoke<string | null>("saved_server"),
+  savedLogin: () => invoke<SavedLogin>("saved_login"),
   restoreSession: () => invoke<User | null>("restore_session"),
-  register: (server: string, username: string, password: string, displayName: string, email?: string, phone?: string) =>
-    invoke<User>("register", { server, username, password, displayName, email: email || null, phone: phone || null }),
-  login: (server: string, username: string, password: string) =>
-    invoke<User>("login", { server, username, password }),
+  register: (server: string, username: string, password: string, displayName: string, email: string, phone: string, staySignedIn: boolean) =>
+    invoke<User>("register", { server, username, password, displayName, email: email || null, phone: phone || null, staySignedIn }),
+  login: (server: string, username: string, password: string, staySignedIn: boolean) =>
+    invoke<User>("login", { server, username, password, staySignedIn }),
   logout: () => invoke<void>("logout"),
 
   serverFeatures: (server: string) => invoke<Features>("server_features", { server }),
@@ -194,6 +202,7 @@ export const api = {
 
   realtimeStart: () => invoke<void>("realtime_start"),
   appInfo: () => invoke<AppInfo>("app_info"),
+  openLogs: () => invoke<void>("open_logs"),
   serverMeta: (server: string) => invoke<ServerMeta>("server_meta", { server }),
   listConversations: () => invoke<Conversation[]>("list_conversations"),
   getConversation: (conversationId: string) => invoke<Conversation>("get_conversation", { conversationId }),
@@ -220,6 +229,8 @@ export const api = {
   voiceDecline: (conversationId: string) => invoke<void>("voice_decline", { conversationId }),
   /** Ring tone on its own output stream; null stops it. playback = device index, null = default. */
   voiceTone: (tone: "ring" | "ringback" | null, playback: number | null) => invoke<void>("voice_tone", { tone, playback }),
+  voiceAudioTest: (mode: "meter" | "loopback" | null) => invoke<void>("voice_audio_test", { mode }),
+  voiceMicLevel: () => invoke<number>("voice_mic_level"),
   voiceCalls: () => invoke<Call[]>("voice_calls"),
 
   listFriends: () => invoke<Friend[]>("list_friends"),

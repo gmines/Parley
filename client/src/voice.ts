@@ -1,10 +1,12 @@
 // Voice calls in the UI: active calls (from realtime events), our own call
 // state (from the voice engine), and the widgets built on them: the call
-// bar, the incoming-call card, the conversation call button and the device
-// picker.
-import { api, errorMessage, type AudioDevice, type Call, type RealtimeEvent, type VoiceCallState, type VoiceEvent, type VoiceStats } from "./api";
+// bar, the incoming-call card and the conversation call button. Audio
+// settings are in views/audio.ts.
+import { api, errorMessage, type Call, type RealtimeEvent, type VoiceCallState, type VoiceEvent, type VoiceStats } from "./api";
+import { applySavedDevices, savedPlaybackIndex } from "./audio";
 import { avatar, h, toast } from "./dom";
 import { conversationTitle, store } from "./store";
+import { audioDialog } from "./views/audio";
 
 type Listener = () => void;
 
@@ -23,6 +25,8 @@ let statsTimer: number | undefined;
 let ringing: { conversation: string; card: HTMLElement; stop: () => void } | null = null;
 // We started a call and nobody else is in it yet: the caller hears ringback.
 let ringback: { conversation: string; timer: number } | null = null;
+// Audio settings' "Test speakers": a few seconds of the ring tone.
+let speakerTest: number | undefined;
 
 function changed() {
   for (const fn of listeners) fn();
@@ -50,6 +54,17 @@ export const voice = {
   /** The conversation whose call we're in, if any. */
   current() {
     return mine;
+  },
+
+  /** Plays the ring tone on the selected output for a few seconds. */
+  testSpeakers() {
+    window.clearTimeout(speakerTest);
+    speakerTest = window.setTimeout(() => {
+      speakerTest = undefined;
+      updateTone();
+    }, 3500);
+    toneNow = null; // restart the tone, so it's audible from the start on the new device
+    updateTone();
   },
 
   inCall(conversationId?: string): boolean {
@@ -80,7 +95,8 @@ export const voice = {
     // Nobody's in it yet: we're placing the call, so ring until someone answers.
     const starting = !(calls.get(conversationId)?.participants.some((p) => p !== me));
     try {
-      await applySavedDevices();
+      // If the saved devices can't be selected, the engine falls back to the defaults.
+      await applySavedDevices().catch(() => {});
       await api.voiceJoin(conversationId);
       if (starting && mine.conversation === conversationId) startRingback(conversationId);
     } catch (e) {
@@ -276,7 +292,7 @@ let toneNow: "ring" | "ringback" | null = null;
 let toneSeq = 0;
 let webTone: (() => void) | null = null;
 async function updateTone() {
-  const want = ringing ? "ring" : ringback ? "ringback" : null;
+  const want = ringing ? "ring" : ringback ? "ringback" : speakerTest !== undefined ? "ring" : null;
   if (want === toneNow) return;
   toneNow = want;
   const seq = ++toneSeq;
@@ -379,7 +395,7 @@ export function callBar(onOpen: (conversationId: string) => void): HTMLElement {
         { class: "call-bar-actions" },
         iconBtn(mine.muted || mine.deafened ? "Unmute" : "Mute", mine.muted || mine.deafened ? "🔇" : "🎤", mine.muted || mine.deafened, () => voice.toggleMute()),
         iconBtn(mine.deafened ? "Undeafen" : "Deafen", mine.deafened ? "🙉" : "🎧", mine.deafened, () => voice.toggleDeafen()),
-        iconBtn("Audio devices", "⚙", false, () => devicesDialog()),
+        iconBtn("Audio settings", "⚙", false, () => audioDialog()),
         iconBtn("Leave call", "✕", false, () => voice.leave(), "call-leave"),
       ),
     );
@@ -432,103 +448,4 @@ export function callControl(conversationId: string): HTMLElement {
   render();
   (el as HTMLElement & { dispose?: () => void }).dispose = () => off.forEach((f) => f());
   return el;
-}
-
-// Devices ------------------------------------------------------------------------
-
-const DEVICE_KEY = "parley.audioDevices";
-
-function savedDevices(): { capture: string | null; playback: string | null } {
-  try {
-    return JSON.parse(localStorage.getItem(DEVICE_KEY) || "") ?? { capture: null, playback: null };
-  } catch {
-    return { capture: null, playback: null };
-  }
-}
-
-/** Device indexes can change between runs, so choices are saved by name. */
-async function applySavedDevices() {
-  const saved = savedDevices();
-  if (!saved.capture && !saved.playback) return;
-  const { devices } = await api.voiceDevices();
-  const find = (name: string | null, kind: "inputs" | "outputs") => {
-    const d = devices.find((x) => x.name === name && x[kind] > 0);
-    return d ? d.index : null;
-  };
-  await api.voiceSetDevices(find(saved.capture, "inputs"), find(saved.playback, "outputs")).catch(() => {});
-}
-
-/** The saved output device's current index, or null for the default. */
-async function savedPlaybackIndex(): Promise<number | null> {
-  const name = savedDevices().playback;
-  if (!name) return null;
-  const { devices } = await api.voiceDevices().catch(() => ({ devices: [] as AudioDevice[] }));
-  return devices.find((d) => d.name === name && d.outputs > 0)?.index ?? null;
-}
-
-async function devicesDialog() {
-  let devices: AudioDevice[] = [];
-  try {
-    devices = (await api.voiceDevices()).devices;
-  } catch (e) {
-    toast(errorMessage(e), "error");
-    return;
-  }
-  const saved = savedDevices();
-  const select = (kind: "inputs" | "outputs", current: string | null) => {
-    const s = h("select", { class: "select" }, h("option", { text: "System default", attrs: { value: "" } }));
-    for (const d of devices.filter((x) => x[kind] > 0 && friendlyName(x.name) !== null)) {
-      const o = h("option", { text: friendlyName(d.name)!, attrs: { value: d.name } });
-      if (d.name === current) o.selected = true;
-      s.append(o);
-    }
-    return s;
-  };
-  const mic = select("inputs", saved.capture);
-  const out = select("outputs", saved.playback);
-  const dialog = h("dialog", { class: "dialog" });
-  const close = () => {
-    dialog.close();
-    dialog.remove();
-  };
-  const save = async () => {
-    const choice = { capture: mic.value || null, playback: out.value || null };
-    try {
-      localStorage.setItem(DEVICE_KEY, JSON.stringify(choice));
-    } catch {
-      // storage unavailable: applies to this session only
-    }
-    await applySavedDevices();
-    if (!choice.capture && !choice.playback) await api.voiceSetDevices(null, null).catch(() => {});
-    toast("Audio devices updated.");
-    close();
-  };
-  dialog.append(
-    h("h2", { text: "Audio devices" }),
-    devices.length === 0 ? h("p", { class: "hint", text: "No audio devices were found." }) : "",
-    h("label", { class: "field" }, h("span", { text: "Microphone" }), mic),
-    h("label", { class: "field" }, h("span", { text: "Speakers / headphones" }), out),
-    h("div", { class: "dialog-actions" }, h("button", { class: "btn btn-ghost", text: "Cancel", on: { click: close } }), h("button", { class: "btn btn-primary", text: "Save", on: { click: save } })),
-  );
-  dialog.addEventListener("cancel", (e) => {
-    e.preventDefault();
-    close();
-  });
-  document.body.append(dialog);
-  dialog.showModal();
-}
-
-/** Readable device names. On Linux, ALSA lists every card several times
- * (surround51:..., iec958:..., front:...): keep one entry per card. Returns
- * null for entries to hide. */
-function friendlyName(name: string): string | null {
-  if (/^(surround\d+|iec958|front|dmix|dsnoop|hw|plughw|null|lavrate|samplerate|speexrate|upmix|vdownmix|usbstream):/i.test(name)) return null;
-  const card = name.match(/^sysdefault:CARD=(.+)$/);
-  if (card) return card[1];
-  const hdmi = name.match(/^hdmi:CARD=([^,]+),DEV=(\d+)$/);
-  if (hdmi) return `${hdmi[1]} output ${Number(hdmi[2]) + 1}`;
-  if (name === "pipewire") return "PipeWire";
-  if (name === "pulse") return "PulseAudio";
-  if (name === "default") return "ALSA default";
-  return name;
 }

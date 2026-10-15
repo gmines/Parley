@@ -67,6 +67,9 @@ extern "C" {
     fn pv_test_play(path: *const c_char) -> c_int;
     fn pv_test_record(path: *const c_char) -> c_int;
     fn pv_ec_selftest(algo: *mut c_char, algo_len: c_int) -> c_int;
+    fn pv_last_error(buf: *mut c_char, len: c_int);
+    fn pv_audio_test(mode: c_int) -> c_int;
+    fn pv_mic_level() -> c_int;
 }
 
 /// Ring tones ([`Engine::tone`]).
@@ -196,7 +199,8 @@ impl Engine {
         match unsafe { pv_join(&p) } {
             0 => Ok(()),
             -2 => Err("already in a call".into()),
-            rc => Err(format!("couldn't start the call (code {rc})")),
+            -5 => Err(sound_error()),
+            rc => Err(last_error().unwrap_or_else(|| format!("couldn't start the call (code {rc})"))),
         }
     }
 
@@ -255,7 +259,28 @@ impl Engine {
     /// Selects capture/playback devices by index; `None` = system default.
     pub fn set_devices(&self, capture: Option<i32>, playback: Option<i32>) -> Result<(), String> {
         let rc = unsafe { pv_set_devices(capture.unwrap_or(-1), playback.unwrap_or(-1)) };
-        if rc == 0 { Ok(()) } else { Err(format!("couldn't switch audio devices (code {rc})")) }
+        if rc == 0 { Ok(()) } else { Err(last_error().unwrap_or_else(|| format!("couldn't switch audio devices (code {rc})"))) }
+    }
+
+    /// Audio test outside a call: open the microphone to show its level
+    /// (`mic_level`), and with `loopback` play it back. `None` stops it.
+    pub fn audio_test(&self, mode: Option<AudioTest>) -> Result<(), String> {
+        let m = match mode {
+            None => 0,
+            Some(AudioTest::Meter) => 1,
+            Some(AudioTest::Loopback) => 2,
+        };
+        match unsafe { pv_audio_test(m) } {
+            0 => Ok(()),
+            -2 => Err("You're in a call: the call bar shows your microphone.".into()),
+            -3 => Err("no sound device".into()),
+            _ => Err(sound_error()),
+        }
+    }
+
+    /// The microphone's level, 0-255 (0 when it isn't open).
+    pub fn mic_level(&self) -> i32 {
+        unsafe { pv_mic_level() }
     }
 
     /// Plays a looping ring tone on its own output stream (`None` stops it),
@@ -299,5 +324,30 @@ impl Engine {
     /// Stops the SIP stack. Only for process exit.
     pub fn shutdown(&self) {
         unsafe { pv_shutdown() }
+    }
+}
+
+/// Audio test modes ([`Engine::audio_test`]).
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AudioTest {
+    Meter,
+    Loopback,
+}
+
+/// Why the engine's last join or audio test failed.
+fn last_error() -> Option<String> {
+    let mut buf = [0 as c_char; 256];
+    unsafe { pv_last_error(buf.as_mut_ptr(), buf.len() as c_int) };
+    let s = unsafe { CStr::from_ptr(buf.as_ptr()) }.to_string_lossy().into_owned();
+    (!s.is_empty()).then_some(s)
+}
+
+fn sound_error() -> String {
+    let detail = last_error().unwrap_or_else(|| "couldn't open the microphone or speaker".into());
+    if cfg!(target_os = "macos") {
+        format!("{detail}. Check that Parley is allowed to use the microphone in System Settings → Privacy & Security → Microphone.")
+    } else {
+        detail
     }
 }

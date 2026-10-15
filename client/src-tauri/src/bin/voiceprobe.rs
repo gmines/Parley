@@ -10,11 +10,13 @@
 //!   voiceprobe --selftest        (echo canceller the app uses, and SIP over TLS)
 //!   voiceprobe --list-devices
 //!   voiceprobe --tone ring|ringback --seconds 5   (plays a ring tone on the default output)
+//!   voiceprobe --audio-test meter|loopback --seconds 5 [--capture N --playback N]
+//!              (the settings page's microphone test: prints the level)
 
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
-use parley_client_lib::voice_engine::{CallState, Engine, EngineEvent, SipCredentials, Tone};
+use parley_client_lib::voice_engine::{AudioTest, CallState, Engine, EngineEvent, SipCredentials, Tone};
 
 fn arg(name: &str) -> Option<String> {
     let mut args = std::env::args();
@@ -75,6 +77,33 @@ fn main() {
         }
         return;
     }
+    // The audio settings test on real devices: print the microphone level.
+    if let Some(mode) = arg("--audio-test") {
+        let mode = match mode.as_str() {
+            "meter" => AudioTest::Meter,
+            "loopback" => AudioTest::Loopback,
+            other => panic!("unknown audio test {other}"),
+        };
+        let secs: u64 = arg("--seconds").and_then(|s| s.parse().ok()).unwrap_or(5);
+        let device = |name| arg(name).map(|s| s.parse().expect("device index"));
+        let engine = Engine::start(false, 1, |_| {}).expect("start engine");
+        engine.set_devices(device("--capture"), device("--playback")).expect("select devices");
+        if let Err(e) = engine.audio_test(Some(mode)) {
+            eprintln!("audio test failed: {e}");
+            std::process::exit(1);
+        }
+        let (mut peak, end) = (0, Instant::now() + Duration::from_secs(secs));
+        while Instant::now() < end {
+            std::thread::sleep(Duration::from_millis(250));
+            let level = engine.mic_level();
+            peak = peak.max(level);
+            println!("mic level {level:>3} {}", "#".repeat(level as usize / 4));
+        }
+        engine.audio_test(None).expect("stop audio test");
+        engine.shutdown();
+        println!("peak {peak}");
+        return;
+    }
     // List the sound devices the engine sees (real audio backend), then exit.
     if std::env::args().any(|a| a == "--list-devices") {
         let engine = Engine::start(false, 1, |_| {}).expect("start engine");
@@ -90,7 +119,9 @@ fn main() {
     let verbose = std::env::var("VOICEPROBE_LOG").is_ok();
 
     let (tx, rx) = mpsc::channel();
-    let engine = Engine::start(true, if verbose { 4 } else { 1 }, move |ev| {
+    // --real-audio: open the real sound devices too (the app's path), not a null device.
+    let real_audio = std::env::args().any(|a| a == "--real-audio");
+    let engine = Engine::start(!real_audio, if verbose { 4 } else { 1 }, move |ev| {
         if let EngineEvent::Log { text, .. } = &ev {
             if verbose {
                 eprintln!("pj: {text}");

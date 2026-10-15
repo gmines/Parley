@@ -11,7 +11,10 @@ info:
     Access tokens are short-lived Ed25519 JWTs; renew with /v1/auth/refresh.
     Refresh tokens are single-use. Presenting a used one revokes the whole
     session (stolen-token detection), so clients must store the new refresh
-    token from every refresh response.
+    token from every refresh response. The exception is a retry: for 10
+    minutes after a refresh, the old token can be refreshed again as long as
+    its replacement hasn't been used (the client never got the response);
+    that replacement is revoked.
 servers:
   - url: http://localhost:8080
 security:

@@ -108,11 +108,17 @@ func TestRefreshRotationAndReuseDetection(t *testing.T) {
 		t.Fatal("refresh token was not rotated")
 	}
 
-	// Replaying the used token is treated as theft: it fails and kills the family.
+	third, err := s.Refresh(ctx, second.RefreshToken)
+	if err != nil {
+		t.Fatalf("second refresh: %v", err)
+	}
+
+	// Replaying a token whose replacement was used is treated as theft: it
+	// fails and kills the family.
 	if _, err := s.Refresh(ctx, first.RefreshToken); !errors.Is(err, ErrInvalidRefresh) {
 		t.Fatalf("reuse err = %v, want ErrInvalidRefresh", err)
 	}
-	if _, err := s.Refresh(ctx, second.RefreshToken); !errors.Is(err, ErrInvalidRefresh) {
+	if _, err := s.Refresh(ctx, third.RefreshToken); !errors.Is(err, ErrInvalidRefresh) {
 		t.Fatalf("token after reuse err = %v, want ErrInvalidRefresh (family revoked)", err)
 	}
 
@@ -129,5 +135,51 @@ func TestRefreshRotationAndReuseDetection(t *testing.T) {
 	}
 	if _, err := s.Refresh(ctx, "garbage"); !errors.Is(err, ErrInvalidRefresh) {
 		t.Fatalf("garbage token err = %v", err)
+	}
+}
+
+// A client that never got a refresh response retries with the old token.
+func TestRefreshRetryAfterLostResponse(t *testing.T) {
+	s, _ := newService(t)
+	ctx := context.Background()
+	now := time.Now()
+	s.now = func() time.Time { return now }
+	first, err := s.Register(ctx, Registration{Username: "dora", Password: "plum-orbit-candle-42", DisplayName: "Dora"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	lost, err := s.Refresh(ctx, first.RefreshToken)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Retried twice (both responses lost), then the client keeps the last one.
+	if _, err := s.Refresh(ctx, first.RefreshToken); err != nil {
+		t.Fatalf("retry: %v", err)
+	}
+	got, err := s.Refresh(ctx, first.RefreshToken)
+	if err != nil {
+		t.Fatalf("second retry: %v", err)
+	}
+	if _, err := s.Refresh(ctx, lost.RefreshToken); !errors.Is(err, ErrInvalidRefresh) {
+		t.Fatalf("lost replacement err = %v, want ErrInvalidRefresh", err)
+	}
+	// Revoking the undelivered replacements didn't end the session.
+	next, err := s.Refresh(ctx, got.RefreshToken)
+	if err != nil {
+		t.Fatalf("refresh after retry: %v", err)
+	}
+
+	// Past the window, a replay revokes the family as usual.
+	second, err := s.Refresh(ctx, next.RefreshToken)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now = now.Add(RefreshRetryWindow + time.Minute)
+	if _, err := s.Refresh(ctx, next.RefreshToken); !errors.Is(err, ErrInvalidRefresh) {
+		t.Fatalf("late replay err = %v, want ErrInvalidRefresh", err)
+	}
+	if _, err := s.Refresh(ctx, second.RefreshToken); !errors.Is(err, ErrInvalidRefresh) {
+		t.Fatalf("after late replay err = %v, want ErrInvalidRefresh (family revoked)", err)
 	}
 }

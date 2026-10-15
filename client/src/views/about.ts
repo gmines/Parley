@@ -57,6 +57,12 @@ export function aboutView(server: string | null, username: string, realtimeState
       },
     });
 
+    const logs = h("button", {
+      class: "btn btn-ghost",
+      text: "Open logs folder",
+      on: { click: () => api.openLogs().catch((e) => toast(String((e as { message?: string }).message ?? e), "error")) },
+    });
+
     body.replaceChildren(
       h(
         "section",
@@ -66,7 +72,12 @@ export function aboutView(server: string | null, username: string, realtimeState
       ),
       h("section", { class: "settings-section" }, h("h2", { text: "This app" }), kv(rows)),
       h("section", { class: "settings-section" }, h("h2", { text: "Connection" }), kv(serverRows)),
-      h("section", { class: "settings-section" }, h("p", { class: "hint", text: "Reporting a problem? Include these details." }), h("div", {}, copy)),
+      h(
+        "section",
+        { class: "settings-section" },
+        h("p", { class: "hint", text: "Reporting a problem? Include these details, and attach the log file (parley.log) if it's about calls." }),
+        h("div", { class: "form-actions form-actions-start" }, copy, logs),
+      ),
     );
   })();
 

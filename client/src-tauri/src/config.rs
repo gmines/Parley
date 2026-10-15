@@ -9,6 +9,12 @@ use serde::{Deserialize, Serialize};
 pub struct Config {
     /// Last server the user logged in to.
     pub server_url: Option<String>,
+    /// Username last used on that server, to fill in the login form.
+    #[serde(default)]
+    pub username: Option<String>,
+    /// The "Stay signed in" choice (default yes).
+    #[serde(default)]
+    pub stay_signed_in: Option<bool>,
 }
 
 pub struct ConfigStore {

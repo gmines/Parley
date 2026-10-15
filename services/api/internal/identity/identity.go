@@ -252,8 +252,15 @@ func (s *Service) loginFailed(ctx context.Context, keys []throttleKey) error {
 	return ErrBadCredentials
 }
 
+// RefreshRetryWindow is how long a client may retry a refresh whose
+// response it never got (sleep, a dropped connection, a timeout).
+const RefreshRetryWindow = 10 * time.Minute
+
 // Refresh exchanges a refresh token for a new session. Each refresh token is
-// single-use; reusing one revokes every token in its family.
+// single-use; reusing one revokes every token in its family, with one
+// exception: within RefreshRetryWindow, a token whose replacement has never
+// been used can be exchanged again (the client never received the
+// replacement), and that replacement is revoked instead.
 func (s *Service) Refresh(ctx context.Context, refreshToken string) (Session, error) {
 	var (
 		sess   Session
@@ -265,13 +272,14 @@ func (s *Service) Refresh(ctx context.Context, refreshToken string) (Session, er
 			u             User
 			expiresAt     time.Time
 			used, revoked *time.Time
+			replacedBy    *uuid.UUID
 		)
 		err := tx.QueryRow(ctx, `
-			SELECT t.id, t.family_id, t.expires_at, t.used_at, t.revoked_at, `+userCols("u")+`
+			SELECT t.id, t.family_id, t.expires_at, t.used_at, t.revoked_at, t.replaced_by, `+userCols("u")+`
 			FROM refresh_tokens t JOIN users u ON u.id = t.user_id
 			WHERE t.token_hash = $1
 			FOR UPDATE OF t`, hashToken(refreshToken),
-		).Scan(append([]any{&id, &family, &expiresAt, &used, &revoked}, userDest(&u)...)...)
+		).Scan(append([]any{&id, &family, &expiresAt, &used, &revoked, &replacedBy}, userDest(&u)...)...)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return ErrInvalidRefresh
 		}
@@ -282,16 +290,31 @@ func (s *Service) Refresh(ctx context.Context, refreshToken string) (Session, er
 			return ErrInvalidRefresh
 		}
 		if used != nil {
-			// Commit the revocation, then report failure.
-			reused = true
-			_, err := tx.Exec(ctx, `UPDATE refresh_tokens SET revoked_at = now()
-				WHERE family_id = $1 AND revoked_at IS NULL`, family)
+			retry := false
+			if replacedBy != nil && s.now().Sub(*used) <= RefreshRetryWindow {
+				// Revoke the replacement if it was never used; if it was, this is a replay.
+				tag, err := tx.Exec(ctx, `UPDATE refresh_tokens SET revoked_at = now()
+					WHERE id = $1 AND used_at IS NULL AND revoked_at IS NULL`, *replacedBy)
+				if err != nil {
+					return err
+				}
+				retry = tag.RowsAffected() == 1
+			}
+			if !retry {
+				// Commit the revocation, then report failure.
+				reused = true
+				_, err := tx.Exec(ctx, `UPDATE refresh_tokens SET revoked_at = now()
+					WHERE family_id = $1 AND revoked_at IS NULL`, family)
+				return err
+			}
+		}
+		var next uuid.UUID
+		sess, next, err = s.issue(ctx, tx, u, family)
+		if err != nil {
 			return err
 		}
-		if _, err := tx.Exec(ctx, `UPDATE refresh_tokens SET used_at = now() WHERE id = $1`, id); err != nil {
-			return err
-		}
-		sess, err = s.newSession(ctx, tx, u, family)
+		_, err = tx.Exec(ctx, `UPDATE refresh_tokens SET used_at = coalesce(used_at, $2), replaced_by = $3 WHERE id = $1`,
+			id, s.now(), next)
 		return err
 	})
 	if err != nil {
@@ -404,20 +427,28 @@ func setPassword(ctx context.Context, tx pgx.Tx, u User, hash string) error {
 }
 
 func (s *Service) newSession(ctx context.Context, q db.Querier, u User, family uuid.UUID) (Session, error) {
+	sess, _, err := s.issue(ctx, q, u, family)
+	return sess, err
+}
+
+// issue creates a session in the token family and returns it with the new
+// refresh token's id.
+func (s *Service) issue(ctx context.Context, q db.Querier, u User, family uuid.UUID) (Session, uuid.UUID, error) {
 	access, accessExp, err := s.cfg.Signer.Sign(auth.Claims{UserID: u.ID, Username: u.Username})
 	if err != nil {
-		return Session{}, err
+		return Session{}, uuid.Nil, err
 	}
 	raw := make([]byte, 32)
 	if _, err := rand.Read(raw); err != nil {
-		return Session{}, err
+		return Session{}, uuid.Nil, err
 	}
 	refresh := base64.RawURLEncoding.EncodeToString(raw)
 	refreshExp := s.now().Add(s.cfg.RefreshTTL)
-	if _, err := q.Exec(ctx, `
-		INSERT INTO refresh_tokens (family_id, user_id, token_hash, expires_at) VALUES ($1, $2, $3, $4)`,
-		family, u.ID, hashToken(refresh), refreshExp); err != nil {
-		return Session{}, fmt.Errorf("insert refresh token: %w", err)
+	var id uuid.UUID
+	if err := q.QueryRow(ctx, `
+		INSERT INTO refresh_tokens (family_id, user_id, token_hash, expires_at) VALUES ($1, $2, $3, $4) RETURNING id`,
+		family, u.ID, hashToken(refresh), refreshExp).Scan(&id); err != nil {
+		return Session{}, uuid.Nil, fmt.Errorf("insert refresh token: %w", err)
 	}
 	return Session{
 		User:             u,
@@ -425,7 +456,7 @@ func (s *Service) newSession(ctx context.Context, q db.Querier, u User, family u
 		AccessExpiresAt:  accessExp,
 		RefreshToken:     refresh,
 		RefreshExpiresAt: refreshExp,
-	}, nil
+	}, id, nil
 }
 
 func hashToken(t string) []byte {

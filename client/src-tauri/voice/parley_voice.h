@@ -76,8 +76,11 @@ int pv_tone(int kind, int playback);
 /* 1 if SIP over TLS is available (needs pv_init): tell the server so. */
 int pv_has_tls(void);
 
-/* Joins a room (makes the call). 0 on success; the outcome arrives as events. */
+/* Joins a room (makes the call). 0 on success; the outcome arrives as events.
+ * -5: the microphone or speaker couldn't be opened. Details: pv_last_error. */
 int pv_join(const pv_join_params *p);
+/* Why the last pv_join / pv_audio_test failed, as text. */
+void pv_last_error(char *buf, int len);
 /* Leaves the current call, if any. */
 void pv_leave(void);
 
@@ -90,8 +93,22 @@ int pv_get_stats(pv_stats *out);
 /* Audio devices: count, then details by index (0 <= i < count). */
 int pv_device_count(void);
 int pv_device_info(int index, pv_device *out);
-/* Selects devices by index; -1 means the system default. */
+/* Selects devices by index; -1 means the system default. Outside a call
+ * (and the audio test) this only records the choice: the devices open when
+ * a call starts. */
 int pv_set_devices(int capture, int playback);
+
+/* Audio test outside a call, on the selected devices. */
+enum pv_audio_test_mode {
+    PV_AUDIO_TEST_OFF = 0,
+    PV_AUDIO_TEST_METER = 1,    /* open the microphone, for pv_mic_level */
+    PV_AUDIO_TEST_LOOPBACK = 2, /* and play it back ("hear yourself") */
+};
+/* 0 = ok, -2 in a call, -3 no audio devices, -4 couldn't open them
+ * (pv_last_error). */
+int pv_audio_test(int mode);
+/* Microphone level, 0-255, while the test or a call has it open. */
+int pv_mic_level(void);
 
 /* Test hooks: loop a WAV file into the call / record what we receive. */
 int pv_test_play(const char *wav_path);

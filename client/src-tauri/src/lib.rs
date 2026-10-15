@@ -9,10 +9,38 @@ mod voice;
 pub mod voice_engine;
 
 use tauri::Manager;
+use tauri_plugin_log::{RotationStrategy, Target, TargetKind, TimezoneStrategy};
 
 pub fn run() {
     tauri::Builder::default()
+        // Logs go to the OS log folder (About → Open logs folder), so testers
+        // can send them with a bug report.
+        .plugin(
+            tauri_plugin_log::Builder::new()
+                .targets([
+                    Target::new(TargetKind::Stdout),
+                    Target::new(TargetKind::LogDir { file_name: Some("parley".into()) }),
+                ])
+                .level(log::LevelFilter::Info)
+                .level_for("tao", log::LevelFilter::Warn)
+                .level_for("hyper_util", log::LevelFilter::Warn)
+                .level_for("reqwest", log::LevelFilter::Warn)
+                .level_for("tungstenite", log::LevelFilter::Warn)
+                .level_for("tokio_tungstenite", log::LevelFilter::Warn)
+                .max_file_size(2_000_000)
+                .rotation_strategy(RotationStrategy::KeepOne)
+                .timezone_strategy(TimezoneStrategy::UseLocal)
+                .build(),
+        )
+        .plugin(tauri_plugin_opener::init())
         .setup(|app| {
+            log::info!(
+                "Parley {} ({}) on {} {}",
+                env!("CARGO_PKG_VERSION"),
+                env!("PARLEY_COMMIT"),
+                std::env::consts::OS,
+                std::env::consts::ARCH
+            );
             let config_path = app.path().app_config_dir()?.join("config.json");
             app.manage(commands::AppState {
                 session: session::SessionManager::new(Box::new(secrets::Keyring)),
@@ -24,6 +52,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             commands::saved_server,
+            commands::saved_login,
             commands::restore_session,
             commands::register,
             commands::login,
@@ -51,6 +80,8 @@ pub fn run() {
             voice::voice_leave,
             voice::voice_set_mute,
             voice::voice_tone,
+            voice::voice_audio_test,
+            voice::voice_mic_level,
             voice::voice_set_deaf,
             voice::voice_status,
             voice::voice_stats,
@@ -60,6 +91,7 @@ pub fn run() {
             voice::voice_calls,
             commands::app_info,
             commands::server_meta,
+            commands::open_logs,
             commands::list_conversations,
             commands::get_conversation,
             commands::open_dm,

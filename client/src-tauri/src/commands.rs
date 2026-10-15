@@ -1,8 +1,10 @@
 //! Tauri commands invoked by the UI (see src/api.ts for the TypeScript side).
 
 use reqwest::Method;
+use serde::Serialize;
 use serde_json::{json, Value};
 use tauri::{AppHandle, State};
+use url::Url;
 
 use crate::api::{Blocked, BlockedList, Features, Friend, FriendsList, Requests, SendResult, User};
 use crate::config::ConfigStore;
@@ -29,6 +31,21 @@ pub fn saved_server(state: State<'_, AppState>) -> Option<String> {
     state.config.load().server_url
 }
 
+/// What the login form starts with: the last server, username and "Stay
+/// signed in" choice.
+#[derive(Serialize)]
+pub struct SavedLogin {
+    server: Option<String>,
+    username: Option<String>,
+    stay_signed_in: bool,
+}
+
+#[tauri::command]
+pub fn saved_login(state: State<'_, AppState>) -> SavedLogin {
+    let c = state.config.load();
+    SavedLogin { server: c.server_url, username: c.username, stay_signed_in: c.stay_signed_in.unwrap_or(true) }
+}
+
 #[tauri::command]
 pub async fn restore_session(state: State<'_, AppState>) -> Result<Option<User>> {
     let Some(server) = state.config.load().server_url else {
@@ -47,8 +64,11 @@ pub async fn register(
     display_name: String,
     email: Option<String>,
     phone: Option<String>,
+    stay_signed_in: Option<bool>,
 ) -> Result<User> {
     let server = normalize_server(&server)?;
+    let stay = stay_signed_in.unwrap_or(true);
+    state.session.set_persist(stay);
     let reg = Registration {
         username: &username,
         password: &password,
@@ -57,9 +77,7 @@ pub async fn register(
         phone: phone.as_deref().unwrap_or(""),
     };
     let user = state.session.register(&server, &reg).await?;
-    state
-        .config
-        .update(|c| c.server_url = Some(server.to_string()));
+    remember_login(&state, &server, &user, stay);
     Ok(user)
 }
 
@@ -69,13 +87,22 @@ pub async fn login(
     server: String,
     username: String,
     password: String,
+    stay_signed_in: Option<bool>,
 ) -> Result<User> {
     let server = normalize_server(&server)?;
+    let stay = stay_signed_in.unwrap_or(true);
+    state.session.set_persist(stay);
     let user = state.session.login(&server, &username, &password).await?;
-    state
-        .config
-        .update(|c| c.server_url = Some(server.to_string()));
+    remember_login(&state, &server, &user, stay);
     Ok(user)
+}
+
+fn remember_login(state: &AppState, server: &Url, user: &User, stay: bool) {
+    state.config.update(|c| {
+        c.server_url = Some(server.to_string());
+        c.username = Some(user.username.clone());
+        c.stay_signed_in = Some(stay);
+    });
 }
 
 #[tauri::command]
@@ -433,4 +460,16 @@ pub fn app_info() -> AppInfo {
 #[tauri::command]
 pub async fn server_meta(state: State<'_, AppState>, server: String) -> Result<Value> {
     state.session.public_get(&normalize_server(&server)?, "v1/meta").await
+}
+
+/// Opens the folder with the app's log files.
+#[tauri::command]
+pub fn open_logs(app: AppHandle) -> Result<()> {
+    use tauri::Manager;
+    use tauri_plugin_opener::OpenerExt;
+    let dir = app.path().app_log_dir().map_err(|e| AppError::Internal(e.to_string()))?;
+    std::fs::create_dir_all(&dir).map_err(|e| AppError::Internal(e.to_string()))?;
+    app.opener()
+        .open_path(dir.to_string_lossy(), None::<&str>)
+        .map_err(|e| AppError::Internal(e.to_string()))
 }

@@ -5,6 +5,11 @@
 //! Refresh tokens are single-use on the server, and reusing one revokes the
 //! whole session. Every refresh therefore happens while holding `state`'s
 //! lock, so two requests can never refresh concurrently with the same token.
+//!
+//! The refresh token is kept in the OS credential store so the next launch
+//! resumes the session, unless the user chose not to stay signed in.
+
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use chrono::{DateTime, Duration, Utc};
 use reqwest::{Method, Response, StatusCode};
@@ -32,6 +37,8 @@ pub struct SessionManager {
     http: reqwest::Client,
     state: Mutex<Option<Active>>,
     secrets: Box<dyn SecretStore>,
+    /// Save the refresh token for the next launch ("stay signed in").
+    persist: AtomicBool,
 }
 
 impl SessionManager {
@@ -46,6 +53,21 @@ impl SessionManager {
             http,
             state: Mutex::new(None),
             secrets,
+            persist: AtomicBool::new(true),
+        }
+    }
+
+    /// Whether sessions started from now on are saved for the next launch.
+    pub fn set_persist(&self, persist: bool) {
+        self.persist.store(persist, Ordering::Relaxed);
+    }
+
+    /// Saves the latest refresh token, or makes sure none is kept.
+    fn save(&self, server: &Url, refresh: &str) {
+        if self.persist.load(Ordering::Relaxed) {
+            self.secrets.set(server.as_str(), refresh);
+        } else {
+            self.secrets.delete(server.as_str());
         }
     }
 
@@ -73,8 +95,11 @@ impl SessionManager {
             return Ok(None);
         };
         match self.refresh_call(server, &refresh).await {
-            Ok(sess) => Ok(Some(self.start(server, sess).await)),
-            Err(AppError::Api { .. }) => {
+            Ok(sess) => {
+                self.set_persist(true);
+                Ok(Some(self.start(server, sess).await))
+            }
+            Err(e) if refresh_rejected(&e) => {
                 self.secrets.delete(server.as_str());
                 Ok(None)
             }
@@ -138,7 +163,7 @@ impl SessionManager {
             )
             .await?;
         let sess: Session = decode(check(resp).await?).await?;
-        self.secrets.set(server.as_str(), &sess.refresh_token);
+        self.save(&server, &sess.refresh_token);
         let user = sess.user.clone();
         *guard = Some(Active::new(server, sess));
         Ok(user)
@@ -234,20 +259,21 @@ impl SessionManager {
         }
         match self.refresh_call(&active.server, &active.refresh).await {
             Ok(sess) => {
-                self.secrets
-                    .set(active.server.as_str(), &sess.refresh_token);
+                self.save(&active.server, &sess.refresh_token);
                 active.user = sess.user;
                 active.access = sess.access_token;
                 active.access_exp = sess.access_expires_at;
                 active.refresh = sess.refresh_token;
                 Ok((active.server.clone(), active.access.clone()))
             }
-            Err(AppError::Api { .. }) => {
+            Err(e) if refresh_rejected(&e) => {
                 self.secrets.delete(active.server.as_str());
                 *guard = None;
                 Err(AppError::SessionExpired)
             }
-            // Network trouble: keep the session and let the caller retry later.
+            // Network trouble or a server error (e.g. mid-deploy): keep the
+            // session and let the caller retry later. The server accepts a
+            // retry of a refresh whose response we never got.
             Err(e) => Err(e),
         }
     }
@@ -276,7 +302,7 @@ impl SessionManager {
     }
 
     async fn start(&self, server: &Url, sess: Session) -> User {
-        self.secrets.set(server.as_str(), &sess.refresh_token);
+        self.save(server, &sess.refresh_token);
         let user = sess.user.clone();
         *self.state.lock().await = Some(Active::new(server.clone(), sess));
         user
@@ -353,6 +379,12 @@ async fn check(resp: Response) -> Result<Response> {
             message: format!("server returned {status}"),
         },
     })
+}
+
+/// The server refused the refresh token itself (expired, revoked, signed out
+/// elsewhere), as opposed to failing to answer: only then is the session over.
+fn refresh_rejected(e: &AppError) -> bool {
+    matches!(e, AppError::Api { code, .. } if code == "invalid_refresh_token" || code == "http_401")
 }
 
 async fn decode<T: DeserializeOwned>(resp: Response) -> Result<T> {
@@ -560,6 +592,46 @@ pub(crate) mod tests {
             Err(AppError::NotLoggedIn)
         ));
         assert!(c.restore(&server).await.unwrap().is_none());
+    }
+
+    /// A one-shot HTTP server answering every request with `status` and `body`.
+    fn canned_server(status: &'static str, body: &'static str) -> Url {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = Url::parse(&format!("http://{}/", listener.local_addr().unwrap())).unwrap();
+        std::thread::spawn(move || {
+            for mut conn in listener.incoming().flatten() {
+                let mut buf = [0u8; 4096];
+                let _ = conn.read(&mut buf);
+                let _ = write!(
+                    conn,
+                    "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+            }
+        });
+        url
+    }
+
+    #[tokio::test]
+    async fn server_errors_keep_the_saved_session() {
+        // e.g. the api restarting during a deploy, behind the ingress
+        let server = canned_server("503 Service Unavailable", "no available server");
+        let store = MemoryStore::default();
+        store.set(server.as_str(), "saved-token");
+        let mgr = SessionManager::new(Box::new(store.clone()));
+        assert!(mgr.restore(&server).await.is_err());
+        assert_eq!(store.get(server.as_str()).as_deref(), Some("saved-token"));
+    }
+
+    #[tokio::test]
+    async fn rejected_refresh_token_ends_the_session() {
+        let server = canned_server("401 Unauthorized", r#"{"code":"invalid_refresh_token","message":"invalid or expired refresh token"}"#);
+        let store = MemoryStore::default();
+        store.set(server.as_str(), "revoked-token");
+        let mgr = SessionManager::new(Box::new(store.clone()));
+        assert!(mgr.restore(&server).await.unwrap().is_none());
+        assert_eq!(store.get(server.as_str()), None);
     }
 
     #[test]

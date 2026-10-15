@@ -4,6 +4,7 @@ import { conversationTitle, dmPeer, store } from "./store";
 import { callBar, disposeWidget, voice } from "./voice";
 import { aboutView, versionLabel } from "./views/about";
 import { accountView } from "./views/account";
+import { audioPanel } from "./views/audio";
 import { authView } from "./views/auth";
 import { conversationView, type ConversationView } from "./views/conversation";
 import { friendsView, type FriendsView } from "./views/friends";
@@ -17,14 +18,13 @@ let teardown: (() => void) | null = null;
 
 async function start() {
   mount(root, h("main", { class: "splash" }, h("div", { class: "brand brand-lg", text: "Parley" })));
-  const server = await api.savedServer();
   try {
     const user = await api.restoreSession();
     if (user) return showApp(user);
-    showAuth(server);
+    showAuth();
   } catch (e) {
     // Couldn't reach the server; the saved session (if any) is kept for next time.
-    showAuth(server, { notice: `Couldn't restore your session: ${errorMessage(e)}` });
+    showAuth({ notice: `Couldn't restore your session: ${errorMessage(e)}` });
   }
 }
 
@@ -34,21 +34,26 @@ function leaveApp() {
   store.clear();
 }
 
-function showAuth(server: string | null, opts: { username?: string; notice?: string } = {}) {
+/** The login screen, filled in with the last server and username. */
+async function showAuth(opts: { server?: string; username?: string; notice?: string } = {}) {
   leaveApp();
-  mount(root, authView({ server, ...opts, onAuthed: showApp, onForgot: showReset }));
+  const saved = await api.savedLogin().catch(() => ({ server: null, username: null, stay_signed_in: true }));
+  const server = opts.server ?? saved.server;
+  // The saved username belongs to the saved server.
+  const username = opts.username ?? (server === saved.server ? saved.username ?? undefined : undefined);
+  mount(root, authView({ ...opts, server, username, staySignedIn: saved.stay_signed_in, onAuthed: showApp, onForgot: showReset }));
 }
 
 function showReset(server: string, username: string, features: Features) {
   leaveApp();
-  mount(root, resetView(server, username, features, (opts) => showAuth(server, opts)));
+  mount(root, resetView(server, username, features, (opts) => showAuth({ server, ...opts })));
 }
 
-async function signedOut(message: string) {
-  showAuth(await api.savedServer(), { notice: message });
+function signedOut(message: string) {
+  showAuth({ notice: message });
 }
 
-type Page = { kind: "friends" } | { kind: "account" } | { kind: "about" } | { kind: "conversation"; id: string };
+type Page = { kind: "friends" } | { kind: "account" } | { kind: "audio" } | { kind: "about" } | { kind: "conversation"; id: string };
 
 function showApp(initialUser: User) {
   leaveApp();
@@ -58,11 +63,13 @@ function showApp(initialUser: User) {
   let page: Page = { kind: "friends" };
   let friends: FriendsView | null = null;
   let conversation: ConversationView | null = null;
+  let audio: ReturnType<typeof audioPanel> | null = null;
 
   // Sidebar ----------------------------------------------------------------------
   const pendingBadge = h("span", { class: "badge", attrs: { hidden: "" } });
   const friendsNav = h("button", { class: "side-item", on: { click: () => go({ kind: "friends" }) } }, "Friends", pendingBadge);
   const accountNav = h("button", { class: "side-item", text: "Account", on: { click: () => go({ kind: "account" }) } });
+  const audioNav = h("button", { class: "side-item", text: "Audio", on: { click: () => go({ kind: "audio" }) } });
   const aboutNav = h("button", { class: "side-item", text: "About", on: { click: () => go({ kind: "about" }) } });
   const version = h("button", { class: "side-version", attrs: { title: "About Parley" }, on: { click: () => go({ kind: "about" }) } });
   api.appInfo().then((i) => (version.textContent = `Parley ${versionLabel(i)}`)).catch(() => {});
@@ -111,7 +118,7 @@ function showApp(initialUser: User) {
     on: {
       click: async () => {
         await api.logout();
-        showAuth(await api.savedServer());
+        showAuth();
       },
     },
   });
@@ -121,7 +128,7 @@ function showApp(initialUser: User) {
     "aside",
     { class: "sidebar" },
     h("div", { class: "brand", text: "Parley" }),
-    h("nav", { class: "side-nav" }, friendsNav, accountNav, aboutNav),
+    h("nav", { class: "side-nav" }, friendsNav, accountNav, audioNav, aboutNav),
     h("div", { class: "side-section" }, h("span", { text: "Direct messages" }), h("span", { class: "side-actions" }, newCall, newGroup)),
     dmList,
     bar,
@@ -188,11 +195,14 @@ function showApp(initialUser: User) {
     page = next;
     friendsNav.classList.toggle("side-item-active", page.kind === "friends");
     accountNav.classList.toggle("side-item-active", page.kind === "account");
+    audioNav.classList.toggle("side-item-active", page.kind === "audio");
     aboutNav.classList.toggle("side-item-active", page.kind === "about");
     friends?.dispose();
     conversation?.dispose();
+    audio?.dispose();
     friends = null;
     conversation = null;
+    audio = null;
 
     if (page.kind === "friends") {
       friends = friendsView(signedOut, openDm, callUser);
@@ -209,6 +219,16 @@ function showApp(initialUser: User) {
           }, signedOut),
         );
       });
+    } else if (page.kind === "audio") {
+      audio = audioPanel();
+      pane.replaceChildren(
+        h(
+          "div",
+          { class: "main" },
+          h("header", { class: "main-header" }, h("h1", { text: "Audio" })),
+          h("section", { class: "content settings" }, h("section", { class: "settings-section" }, h("h2", { text: "Microphone and speakers" }), audio.el)),
+        ),
+      );
     } else if (page.kind === "about") {
       api.savedServer().then((server) => {
         if (page.kind === "about") pane.replaceChildren(aboutView(server, user.username, () => statusTitle[realtimeState] ?? realtimeState));
@@ -324,6 +344,7 @@ function showApp(initialUser: User) {
   teardown = () => {
     friends?.dispose();
     conversation?.dispose();
+    audio?.dispose();
     unsubscribeStore();
     unsubscribeVoice();
     disposeWidget(bar);

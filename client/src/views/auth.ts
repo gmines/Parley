@@ -5,6 +5,8 @@ import { versionLabel } from "./about";
 export interface AuthOptions {
   server: string | null;
   username?: string;
+  /** "Stay signed in" starts checked unless the user unchecked it last time. */
+  staySignedIn?: boolean;
   notice?: string;
   onAuthed: (u: User) => void;
   onForgot: (server: string, username: string, features: Features) => void;
@@ -26,6 +28,15 @@ export function authView(opts: AuthOptions): HTMLElement {
   const password = input("password", "Password", "", "", "password");
   username.input.autocomplete = "username";
   for (const f of [displayName, email, phone]) f.input.required = false;
+
+  const stay = h("input", { attrs: { type: "checkbox", id: "f-stay" } });
+  stay.checked = opts.staySignedIn ?? true;
+  const stayField = h(
+    "label",
+    { class: "check", attrs: { for: "f-stay", title: "Keeps you signed in on this computer (for 30 days without using Parley). Uncheck on a shared computer." } },
+    stay,
+    h("span", { text: "Stay signed in" }),
+  );
 
   const httpWarning = h("p", {
     class: "hint hint-warn",
@@ -107,6 +118,7 @@ export function authView(opts: AuthOptions): HTMLElement {
     contactHint,
     password.field,
     passwordHint,
+    stayField,
     error,
     submit,
     h("div", { class: "auth-links" }, switchLink, forgotLink),
@@ -121,7 +133,7 @@ export function authView(opts: AuthOptions): HTMLElement {
     try {
       const user =
         mode === "login"
-          ? await api.login(server.input.value, username.input.value, password.input.value)
+          ? await api.login(server.input.value, username.input.value, password.input.value, stay.checked)
           : await api.register(
               server.input.value,
               username.input.value,
@@ -129,6 +141,7 @@ export function authView(opts: AuthOptions): HTMLElement {
               displayName.input.value,
               email.field.hidden ? "" : email.input.value,
               phone.field.hidden ? "" : phone.input.value,
+              stay.checked,
             );
       opts.onAuthed(user);
     } catch (err) {
