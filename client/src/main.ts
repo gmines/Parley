@@ -7,7 +7,7 @@ import { accountView } from "./views/account";
 import { authView } from "./views/auth";
 import { conversationView, type ConversationView } from "./views/conversation";
 import { friendsView, type FriendsView } from "./views/friends";
-import { newGroupDialog } from "./views/newgroup";
+import { newCallDialog, newGroupDialog } from "./views/newgroup";
 import { resetView } from "./views/reset";
 
 const root = document.getElementById("app")!;
@@ -82,6 +82,20 @@ function showApp(initialUser: User) {
       },
     },
   });
+  const newCall = h("button", {
+    class: "icon-btn",
+    text: "📞",
+    attrs: { title: "New call", "aria-label": "New call" },
+    on: {
+      click: async () => {
+        const c = await newCallDialog().catch((e) => (toast(errorMessage(e), "error"), null));
+        if (c) {
+          store.upsert(c);
+          voice.join(c.id);
+        }
+      },
+    },
+  });
   const connection = h("span", { class: "conn-dot", attrs: { title: "Connecting…" } });
   const meName = h("span", { class: "me-name" });
   const meSub = h("span", { class: "me-sub" });
@@ -108,7 +122,7 @@ function showApp(initialUser: User) {
     { class: "sidebar" },
     h("div", { class: "brand", text: "Parley" }),
     h("nav", { class: "side-nav" }, friendsNav, accountNav, aboutNav),
-    h("div", { class: "side-section" }, h("span", { text: "Direct messages" }), newGroup),
+    h("div", { class: "side-section" }, h("span", { text: "Direct messages" }), h("span", { class: "side-actions" }, newCall, newGroup)),
     dmList,
     bar,
     h("div", { class: "me" }, meAvatar, h("div", { class: "me-text" }, meName, meSub), logout),
@@ -133,17 +147,31 @@ function showApp(initialUser: User) {
           : c.kind === "group"
             ? `${c.members.length} members`
             : "";
+        const live = voice.call(c.id);
+        const here = voice.inCall(c.id);
         return h(
-          "button",
-          {
-            class: `dm-item${active ? " dm-item-active" : ""}${c.unread_count ? " dm-item-unread" : ""}`,
-            attrs: active ? { "aria-current": "page" } : {},
-            on: { click: () => go({ kind: "conversation", id: c.id }) },
-          },
-          peer ? avatar(peer, "sm") : h("div", { class: "avatar avatar-sm avatar-group", text: "#", attrs: { "aria-hidden": "true" } }),
-          h("span", { class: "row-text" }, h("span", { class: "row-name", text: conversationTitle(c) }), h("span", { class: "row-sub", text: preview })),
-          voice.call(c.id) ? h("span", { class: "dm-call", text: "🔊", attrs: { title: `Call in progress (${voice.call(c.id)!.participants.length})` } }) : null,
-          c.unread_count ? h("span", { class: "badge", text: c.unread_count >= 100 ? "99+" : String(c.unread_count) }) : null,
+          "div",
+          { class: `dm-row${active ? " dm-item-active" : ""}` },
+          h(
+            "button",
+            {
+              class: `dm-item${c.unread_count ? " dm-item-unread" : ""}`,
+              attrs: active ? { "aria-current": "page" } : {},
+              on: { click: () => go({ kind: "conversation", id: c.id }) },
+            },
+            peer ? avatar(peer, "sm") : h("div", { class: "avatar avatar-sm avatar-group", text: "#", attrs: { "aria-hidden": "true" } }),
+            h("span", { class: "row-text" }, h("span", { class: "row-name", text: conversationTitle(c) }), h("span", { class: "row-sub", text: preview })),
+            live ? h("span", { class: "dm-call", text: "🔊", attrs: { title: `Call in progress (${live.participants.length})` } }) : null,
+            c.unread_count ? h("span", { class: "badge", text: c.unread_count >= 100 ? "99+" : String(c.unread_count) }) : null,
+          ),
+          here
+            ? null
+            : h("button", {
+                class: "dm-call-btn",
+                text: "📞",
+                attrs: { title: live ? "Join call" : "Call", "aria-label": `${live ? "Join call in" : "Call"} ${conversationTitle(c)}` },
+                on: { click: () => voice.join(c.id) },
+              }),
         );
       }),
     );
@@ -167,7 +195,7 @@ function showApp(initialUser: User) {
     conversation = null;
 
     if (page.kind === "friends") {
-      friends = friendsView(signedOut, openDm);
+      friends = friendsView(signedOut, openDm, callUser);
       friends.onPendingChange = setPending;
       pane.replaceChildren(friends.el);
     } else if (page.kind === "account") {
@@ -193,6 +221,17 @@ function showApp(initialUser: User) {
       }
     }
     renderDmList();
+  }
+
+  /** Calls a friend from wherever we are (their DM's call), without opening it. */
+  async function callUser(u: UserRef) {
+    try {
+      const c = await api.openDm(u.id);
+      store.upsert(c);
+      await voice.join(c.id);
+    } catch (e) {
+      toast(errorMessage(e), "error");
+    }
   }
 
   async function openDm(u: UserRef) {

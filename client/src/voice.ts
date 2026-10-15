@@ -21,6 +21,8 @@ let mine: { conversation: string | null; state: VoiceCallState; muted: boolean; 
 };
 let statsTimer: number | undefined;
 let ringing: { conversation: string; card: HTMLElement; stop: () => void } | null = null;
+// We started a call and nobody else is in it yet: the caller hears ringback.
+let ringback: { conversation: string; timer: number } | null = null;
 
 function changed() {
   for (const fn of listeners) fn();
@@ -75,9 +77,12 @@ export const voice = {
     }
     mine = { ...mine, conversation: conversationId, state: "calling", stats: null, since: Date.now() };
     changed();
+    // Nobody's in it yet: we're placing the call, so ring until someone answers.
+    const starting = !(calls.get(conversationId)?.participants.some((p) => p !== me));
     try {
       await applySavedDevices();
       await api.voiceJoin(conversationId);
+      if (starting && mine.conversation === conversationId) startRingback(conversationId);
     } catch (e) {
       mine = { ...mine, conversation: null, state: "idle" };
       changed();
@@ -86,6 +91,7 @@ export const voice = {
   },
 
   async leave() {
+    stopRingback();
     await api.voiceLeave().catch(() => {});
     mine = { ...mine, conversation: null, state: "idle", stats: null };
     stopStats();
@@ -123,6 +129,8 @@ export const voice = {
         calls.set(c.conversation_id, c);
         // Someone answered elsewhere on our account: stop ringing.
         if (c.participants.includes(me)) stopRinging(c.conversation_id);
+        // Someone answered our call: stop the ringback.
+        if (ringback?.conversation === c.conversation_id && c.participants.some((p) => p !== me)) stopRingback();
         break;
       }
       case "call.ended":
@@ -133,6 +141,8 @@ export const voice = {
         if (e.data.user_id === me) stopRinging(e.data.conversation_id);
         else if (voice.inCall(e.data.conversation_id) && store.get(e.data.conversation_id)?.kind === "dm") {
           toast(`${nameOf(e.data.conversation_id, e.data.user_id)} declined the call.`);
+          // Like a phone: a declined 1:1 call ends, unless they'd already answered.
+          if (ringback?.conversation === e.data.conversation_id) voice.leave();
         }
         break;
       default:
@@ -149,6 +159,7 @@ export const voice = {
       if (failed && mine.conversation) toast(`Call failed: ${e.reason || `error ${e.status}`}`, "error");
       mine = { ...mine, conversation: null, state: "idle", stats: null };
       stopStats();
+      stopRingback();
     } else {
       mine = { ...mine, state: e.state };
       if (e.state === "connected") {
@@ -164,6 +175,7 @@ export const voice = {
     mine = { conversation: null, state: "idle", muted: false, deafened: false, stats: null, since: 0 };
     stopStats();
     if (ringing) stopRinging(ringing.conversation);
+    stopRingback();
     changed();
   },
 };
@@ -217,51 +229,100 @@ function startRinging(c: Call) {
     h("button", { class: "btn btn-sm btn-danger", text: "Decline", on: { click: () => voice.decline(c.conversation_id) } }),
   );
   document.body.append(card);
-  const stopTone = ringTone();
   const timer = window.setTimeout(() => stopRinging(c.conversation_id), RING_TIMEOUT_MS);
   ringing = {
     conversation: c.conversation_id,
     card,
     stop: () => {
-      stopTone();
       window.clearTimeout(timer);
       card.remove();
     },
   };
+  updateTone();
 }
 
 function stopRinging(conversationId: string) {
   if (ringing?.conversation === conversationId) {
     ringing.stop();
     ringing = null;
+    updateTone();
   }
 }
 
-/** A gentle two-tone ring (generated, no audio files). Returns a stop function. */
-function ringTone(): () => void {
+function startRingback(conversationId: string) {
+  stopRingback();
+  const timer = window.setTimeout(() => {
+    // Recipients stop ringing after the same time.
+    const dm = store.get(conversationId)?.kind === "dm";
+    stopRingback();
+    if (dm && voice.inCall(conversationId)) {
+      toast("No answer.");
+      voice.leave();
+    }
+  }, RING_TIMEOUT_MS);
+  ringback = { conversation: conversationId, timer };
+  updateTone();
+}
+
+function stopRingback() {
+  if (!ringback) return;
+  window.clearTimeout(ringback.timer);
+  ringback = null;
+  updateTone();
+}
+
+/** Plays whichever tone applies: an incoming call's ring wins over our ringback. */
+let toneNow: "ring" | "ringback" | null = null;
+let toneSeq = 0;
+let webTone: (() => void) | null = null;
+async function updateTone() {
+  const want = ringing ? "ring" : ringback ? "ringback" : null;
+  if (want === toneNow) return;
+  toneNow = want;
+  const seq = ++toneSeq;
+  webTone?.();
+  webTone = null;
+  const playback = want ? await savedPlaybackIndex() : null;
+  if (seq !== toneSeq) return; // changed again meanwhile: a newer call handles it
+  try {
+    await api.voiceTone(want, playback);
+  } catch {
+    // The native engine couldn't play it: fall back to the webview (which may
+    // stay silent until the user has interacted with the app).
+    if (want && seq === toneSeq) webTone = webAudioTone(want);
+  }
+}
+
+/** Fallback tones in the webview (generated, no audio files). Returns a stop function. */
+function webAudioTone(kind: "ring" | "ringback"): () => void {
   let ctx: AudioContext | null = null;
   let timer: number | undefined;
   try {
     ctx = new AudioContext();
-    const ring = () => {
-      if (!ctx) return;
-      const t = ctx.currentTime;
-      for (const [f, start] of [[660, 0], [880, 0.25], [660, 0.9], [880, 1.15]] as const) {
-        const osc = ctx.createOscillator();
-        const gain = ctx.createGain();
+    ctx.resume().catch(() => {});
+    const beep = (freqs: number[], start: number, len: number, vol: number) => {
+      const t = ctx!.currentTime + start;
+      for (const f of freqs) {
+        const osc = ctx!.createOscillator();
+        const gain = ctx!.createGain();
         osc.frequency.value = f;
-        gain.gain.setValueAtTime(0, t + start);
-        gain.gain.linearRampToValueAtTime(0.08, t + start + 0.02);
-        gain.gain.linearRampToValueAtTime(0, t + start + 0.22);
-        osc.connect(gain).connect(ctx.destination);
-        osc.start(t + start);
-        osc.stop(t + start + 0.25);
+        gain.gain.setValueAtTime(0, t);
+        gain.gain.linearRampToValueAtTime(vol, t + 0.02);
+        gain.gain.setValueAtTime(vol, t + len - 0.03);
+        gain.gain.linearRampToValueAtTime(0, t + len);
+        osc.connect(gain).connect(ctx!.destination);
+        osc.start(t);
+        osc.stop(t + len);
       }
     };
-    ring();
-    timer = window.setInterval(ring, 3000);
+    const once =
+      kind === "ring"
+        ? () => [[660, 0], [880, 0.25], [660, 0.9], [880, 1.15]].forEach(([f, at]) => beep([f], at, 0.22, 0.12))
+        : () => beep([440, 480], 0, 2, 0.06);
+    once();
+    timer = window.setInterval(once, kind === "ring" ? 3000 : 6000);
   } catch {
-    // No audio output available: the card alone will do.
+    // No audio output: the card / call bar alone will do.
   }
   return () => {
     window.clearInterval(timer);
@@ -395,6 +456,14 @@ async function applySavedDevices() {
     return d ? d.index : null;
   };
   await api.voiceSetDevices(find(saved.capture, "inputs"), find(saved.playback, "outputs")).catch(() => {});
+}
+
+/** The saved output device's current index, or null for the default. */
+async function savedPlaybackIndex(): Promise<number | null> {
+  const name = savedDevices().playback;
+  if (!name) return null;
+  const { devices } = await api.voiceDevices().catch(() => ({ devices: [] as AudioDevice[] }));
+  return devices.find((d) => d.name === name && d.outputs > 0)?.index ?? null;
 }
 
 async function devicesDialog() {

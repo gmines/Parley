@@ -218,6 +218,8 @@ export const api = {
   voiceSetDevices: (capture: number | null, playback: number | null) =>
     invoke<void>("voice_set_devices", { capture, playback }),
   voiceDecline: (conversationId: string) => invoke<void>("voice_decline", { conversationId }),
+  /** Ring tone on its own output stream; null stops it. playback = device index, null = default. */
+  voiceTone: (tone: "ring" | "ringback" | null, playback: number | null) => invoke<void>("voice_tone", { tone, playback }),
   voiceCalls: () => invoke<Call[]>("voice_calls"),
 
   listFriends: () => invoke<Friend[]>("list_friends"),

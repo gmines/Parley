@@ -37,6 +37,11 @@ static int g_muted, g_deaf;
 static pjsua_player_id g_player = PJSUA_INVALID_ID;
 static pjsua_recorder_id g_recorder = PJSUA_INVALID_ID;
 static int g_has_tls;
+static int g_null_audio;
+/* Ring tones play on their own output-only stream (pv_tone). */
+static pj_pool_t *g_tone_pool;
+static pjmedia_port *g_tone_gen;
+static pjmedia_snd_port *g_tone_snd;
 
 /* pjsua requires every calling thread to be registered with pjlib. */
 static void ensure_thread(void) {
@@ -228,7 +233,8 @@ int pv_init(const pv_options *opt, pv_event_cb cb, void *ctx) {
     /* TLS is preferred, but servers before 0.4 only speak plain TCP: a
      * missing TLS transport only rules out TLS (see pv_has_tls). */
     g_has_tls = create_tls_transport() == PJ_SUCCESS;
-    if (opt && opt->null_audio) pjsua_set_null_snd_dev();
+    g_null_audio = opt && opt->null_audio;
+    if (g_null_audio) pjsua_set_null_snd_dev();
     if (pjsua_start() != PJ_SUCCESS) {
         pjsua_destroy();
         return -4;
@@ -238,9 +244,26 @@ int pv_init(const pv_options *opt, pv_event_cb cb, void *ctx) {
     return 0;
 }
 
+static void tone_stop(void) {
+    if (g_tone_snd) {
+        pjmedia_snd_port_disconnect(g_tone_snd);
+        pjmedia_snd_port_destroy(g_tone_snd);
+        g_tone_snd = NULL;
+    }
+    if (g_tone_gen) {
+        pjmedia_port_destroy(g_tone_gen);
+        g_tone_gen = NULL;
+    }
+    if (g_tone_pool) {
+        pj_pool_release(g_tone_pool);
+        g_tone_pool = NULL;
+    }
+}
+
 void pv_shutdown(void) {
     if (!g_started) return;
     ensure_thread();
+    tone_stop();
     pjsua_call_hangup_all();
     pjsua_destroy();
     g_started = 0;
@@ -383,6 +406,46 @@ int pv_set_devices(int capture, int playback) {
     if (capture < 0) capture = PJMEDIA_AUD_DEFAULT_CAPTURE_DEV;
     if (playback < 0) playback = PJMEDIA_AUD_DEFAULT_PLAYBACK_DEV;
     return pjsua_set_snd_dev(capture, playback) == PJ_SUCCESS ? 0 : -2;
+}
+
+/* Ring tones, generated (no audio files) and played on an output-only stream
+ * of their own: ringing doesn't open the microphone, and it doesn't touch
+ * the call's audio. */
+#define TONE_RATE 16000
+#define TONE_FRAME (TONE_RATE / 50)
+
+int pv_tone(int kind, int playback) {
+    if (!g_started) return -1;
+    ensure_thread();
+    tone_stop();
+    if (kind == PV_TONE_NONE) return 0;
+    if (g_null_audio) return -2;
+
+    /* Ringback (caller): the North American 440+480 Hz, 2 s on, 4 s off.
+     * Incoming: two short rising chirps, twice, every 3 s. */
+    static const pjmedia_tone_desc ringback[] = {{440, 480, 2000, 4000, 7000, 0}};
+    static const pjmedia_tone_desc ring[] = {
+        {660, 0, 220, 30, 0, 0}, {880, 0, 220, 400, 0, 0},
+        {660, 0, 220, 30, 0, 0}, {880, 0, 220, 1880, 0, 0},
+    };
+    const pjmedia_tone_desc *tones = kind == PV_TONE_RINGBACK ? ringback : ring;
+    unsigned count = kind == PV_TONE_RINGBACK ? PJ_ARRAY_SIZE(ringback) : PJ_ARRAY_SIZE(ring);
+
+    if (playback < 0) {
+        int cap;
+        if (pjsua_get_snd_dev(&cap, &playback) != PJ_SUCCESS || playback < PJMEDIA_AUD_DEFAULT_PLAYBACK_DEV)
+            playback = PJMEDIA_AUD_DEFAULT_PLAYBACK_DEV;
+    }
+    g_tone_pool = pjsua_pool_create("tone", 1024, 1024);
+    if (!g_tone_pool) return -3;
+    if (pjmedia_tonegen_create(g_tone_pool, TONE_RATE, 1, TONE_FRAME, 16, 0, &g_tone_gen) != PJ_SUCCESS ||
+        pjmedia_tonegen_play(g_tone_gen, count, tones, PJMEDIA_TONEGEN_LOOP) != PJ_SUCCESS ||
+        pjmedia_snd_port_create_player(g_tone_pool, playback, TONE_RATE, 1, TONE_FRAME, 16, 0, &g_tone_snd) != PJ_SUCCESS ||
+        pjmedia_snd_port_connect(g_tone_snd, g_tone_gen) != PJ_SUCCESS) {
+        tone_stop();
+        return -4;
+    }
+    return 0;
 }
 
 int pv_test_play(const char *wav_path) {

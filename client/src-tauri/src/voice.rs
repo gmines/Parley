@@ -12,7 +12,7 @@ use url::Url;
 
 use crate::commands::AppState;
 use crate::error::{AppError, Result};
-use crate::voice_engine::{CallState, Device, Engine, EngineEvent, SipCredentials, Stats};
+use crate::voice_engine::{CallState, Device, Engine, EngineEvent, SipCredentials, Stats, Tone};
 
 #[derive(Default)]
 pub struct Voice {
@@ -170,6 +170,13 @@ pub fn voice_devices(app: AppHandle) -> Result<Devices> {
 #[tauri::command]
 pub fn voice_set_devices(app: AppHandle, capture: Option<i32>, playback: Option<i32>) -> Result<()> {
     engine(&app)?.set_devices(capture, playback).map_err(internal)
+}
+
+/// Starts (or with null, stops) a ring tone: "ringback" while we're calling,
+/// "ring" for an incoming call. `playback` = device index, null = default.
+#[tauri::command]
+pub fn voice_tone(app: AppHandle, tone: Option<Tone>, playback: Option<i32>) -> Result<()> {
+    engine(&app)?.tone(tone, playback).map_err(internal)
 }
 
 /// Declines a ringing call (the others' clients stop ringing for us).

@@ -63,6 +63,16 @@ int pv_init(const pv_options *opt, pv_event_cb cb, void *ctx);
 /* Stops everything (hangs up). */
 void pv_shutdown(void);
 
+/* Ring tones (pv_tone). */
+enum pv_tone_kind {
+    PV_TONE_NONE = 0,
+    PV_TONE_RINGBACK = 1, /* we're calling: waiting for someone to answer */
+    PV_TONE_RING = 2,     /* incoming call */
+};
+/* Starts a looping tone on `playback` (device index, -1 = the call's or the
+ * default output), replacing any other; PV_TONE_NONE stops it. 0 = ok. */
+int pv_tone(int kind, int playback);
+
 /* 1 if SIP over TLS is available (needs pv_init): tell the server so. */
 int pv_has_tls(void);
 

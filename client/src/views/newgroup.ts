@@ -144,3 +144,16 @@ export function dmToGroupDialog(peer: UserRef): Promise<Conversation | null> {
     run: (ids, name) => api.createGroup([peer.id, ...ids], name),
   });
 }
+
+/** Call one friend (their DM) or several (a new group): resolves to the conversation to call. */
+export function newCallDialog(): Promise<Conversation | null> {
+  return pickFriends({
+    title: "New call",
+    hint: "Pick one friend to call them, or several for a group call (that starts a new group).",
+    submit: "Call",
+    min: 1,
+    max: MAX_GROUP - 1,
+    withName: true,
+    run: (ids, name) => (ids.length === 1 ? api.openDm(ids[0]) : api.createGroup(ids, name)),
+  });
+}

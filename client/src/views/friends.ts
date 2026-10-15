@@ -17,9 +17,13 @@ export interface FriendsView {
 
 /**
  * onSignedOut is called if the session expires while the view is open;
- * onMessage when the user clicks "Message" on a friend.
+ * onMessage / onCall when the user clicks "Message" / "Call" on a friend.
  */
-export function friendsView(onSignedOut: (message: string) => void, onMessage: (u: UserRef) => void): FriendsView {
+export function friendsView(
+  onSignedOut: (message: string) => void,
+  onMessage: (u: UserRef) => void,
+  onCall: (u: UserRef) => void,
+): FriendsView {
   let tab: Tab = "all";
   let friends: Friend[] = [];
   let requests: Requests = { incoming: [], outgoing: [] };
@@ -127,6 +131,7 @@ export function friendsView(onSignedOut: (message: string) => void, onMessage: (
             f.user,
             null,
             actionBtn("Message", "btn-primary", () => onMessage(f.user)),
+            actionBtn("📞 Call", "btn-ok", () => onCall(f.user)),
             actionBtn("Remove", "btn-ghost", async () => {
               const ok = await confirmDialog(
                 `Remove ${f.user.display_name}?`,

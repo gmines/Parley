@@ -50,6 +50,7 @@ pub fn run() {
             voice::voice_join,
             voice::voice_leave,
             voice::voice_set_mute,
+            voice::voice_tone,
             voice::voice_set_deaf,
             voice::voice_status,
             voice::voice_stats,

@@ -9,11 +9,12 @@
 //!              --play in.wav --record out.wav --seconds 10
 //!   voiceprobe --selftest        (echo canceller the app uses, and SIP over TLS)
 //!   voiceprobe --list-devices
+//!   voiceprobe --tone ring|ringback --seconds 5   (plays a ring tone on the default output)
 
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
-use parley_client_lib::voice_engine::{CallState, Engine, EngineEvent, SipCredentials};
+use parley_client_lib::voice_engine::{CallState, Engine, EngineEvent, SipCredentials, Tone};
 
 fn arg(name: &str) -> Option<String> {
     let mut args = std::env::args();
@@ -49,6 +50,30 @@ fn main() {
             ok = false;
         }
         std::process::exit(if ok { 0 } else { 1 });
+    }
+    // Play a ring tone on the real default output for a while.
+    if let Some(kind) = arg("--tone") {
+        let tone = match kind.as_str() {
+            "ring" => Tone::Ring,
+            "ringback" => Tone::Ringback,
+            other => panic!("unknown tone {other}"),
+        };
+        let secs: u64 = arg("--seconds").and_then(|s| s.parse().ok()).unwrap_or(5);
+        let engine = Engine::start(false, 1, |_| {}).expect("start engine");
+        let result = engine.tone(Some(tone), None);
+        if result.is_ok() {
+            std::thread::sleep(Duration::from_secs(secs));
+            engine.tone(None, None).expect("stop tone");
+        }
+        engine.shutdown();
+        match result {
+            Ok(()) => println!("played {kind} for {secs} s"),
+            Err(e) => {
+                eprintln!("ring tone failed: {e}");
+                std::process::exit(1);
+            }
+        }
+        return;
     }
     // List the sound devices the engine sees (real audio backend), then exit.
     if std::env::args().any(|a| a == "--list-devices") {

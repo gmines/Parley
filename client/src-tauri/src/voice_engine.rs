@@ -55,6 +55,7 @@ extern "C" {
     fn pv_init(opt: *const PvOptions, cb: EventCb, ctx: *mut c_void) -> c_int;
     fn pv_shutdown();
     fn pv_has_tls() -> c_int;
+    fn pv_tone(kind: c_int, playback: c_int) -> c_int;
     fn pv_join(p: *const PvJoinParams) -> c_int;
     fn pv_leave();
     fn pv_set_mute(muted: c_int);
@@ -66,6 +67,16 @@ extern "C" {
     fn pv_test_play(path: *const c_char) -> c_int;
     fn pv_test_record(path: *const c_char) -> c_int;
     fn pv_ec_selftest(algo: *mut c_char, algo_len: c_int) -> c_int;
+}
+
+/// Ring tones ([`Engine::tone`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Tone {
+    /// We're calling: waiting for someone to answer.
+    Ringback,
+    /// Incoming call.
+    Ring,
 }
 
 /// Credentials from voice-control's join endpoint.
@@ -245,6 +256,21 @@ impl Engine {
     pub fn set_devices(&self, capture: Option<i32>, playback: Option<i32>) -> Result<(), String> {
         let rc = unsafe { pv_set_devices(capture.unwrap_or(-1), playback.unwrap_or(-1)) };
         if rc == 0 { Ok(()) } else { Err(format!("couldn't switch audio devices (code {rc})")) }
+    }
+
+    /// Plays a looping ring tone on its own output stream (`None` stops it),
+    /// on `playback` (device index) or the call's / default output.
+    pub fn tone(&self, tone: Option<Tone>, playback: Option<i32>) -> Result<(), String> {
+        let kind = match tone {
+            None => 0,
+            Some(Tone::Ringback) => 1,
+            Some(Tone::Ring) => 2,
+        };
+        match unsafe { pv_tone(kind, playback.unwrap_or(-1)) } {
+            0 => Ok(()),
+            -2 => Err("no sound device".into()),
+            rc => Err(format!("couldn't play the ring tone (code {rc})")),
+        }
     }
 
     /// Test hook: loop a WAV file into the call instead of the microphone.

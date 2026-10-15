@@ -318,8 +318,29 @@ input:focus { outline: none; border-color: var(--accent); }
   color: var(--text-2);
   min-width: 0;
 }
-.dm-item:hover { background: var(--surface-2); color: var(--text); }
-.dm-item-active { background: var(--surface-2); color: var(--text); }
+.dm-row { position: relative; display: flex; border-radius: var(--radius); }
+.dm-row > .dm-item { flex: 1; }
+.dm-row:hover { background: var(--surface-2); }
+.dm-row:hover > .dm-item { color: var(--text); }
+.dm-item-active { background: var(--surface-2); }
+.dm-item-active > .dm-item { color: var(--text); }
+/* Call straight from the list: shown on hover / keyboard focus. */
+.dm-call-btn {
+  position: absolute;
+  right: 6px;
+  top: 50%;
+  transform: translateY(-50%);
+  border: 0;
+  border-radius: var(--radius);
+  background: var(--surface);
+  padding: 4px 6px;
+  font-size: 13px;
+  cursor: pointer;
+  opacity: 0;
+}
+.dm-row:hover > .dm-call-btn, .dm-call-btn:focus-visible { opacity: 1; }
+.dm-call-btn:hover { background: var(--ok, var(--surface-2)); }
+.side-actions { display: inline-flex; gap: 2px; }
 .dm-item-unread .row-name { color: var(--text); }
 .dm-item .row-name { font-weight: 500; }
 .dm-item-unread .row-name { font-weight: 700; }
