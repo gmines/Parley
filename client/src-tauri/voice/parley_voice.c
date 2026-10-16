@@ -48,6 +48,10 @@ static int g_test_mode;
 static pj_pool_t *g_test_pool;
 static pjsua_conf_port_id g_test_slot = PJSUA_INVALID_ID;
 static char g_last_error[256];
+/* The call has the speaker but no microphone (pv_join returned 1). */
+static int g_listen_only;
+/* Volume (pv_set_levels): multipliers on the mic and on what we play. */
+static float g_mic_gain = 1.0f, g_out_gain = 1.0f;
 
 static void set_error(const char *what, pj_status_t st) {
     char msg[160];
@@ -56,8 +60,15 @@ static void set_error(const char *what, pj_status_t st) {
     PJ_LOG(1, (THIS_FILE, "%s", g_last_error));
 }
 
-static pj_status_t open_sound(void);
+static pj_status_t open_sound(pj_bool_t allow_listen_only);
 static void audio_test_stop(void);
+
+/* Slot 0 is the sound device: rx is the microphone into the bridge, tx what
+ * the bridge plays. The bridge clips rather than wraps when boosted. */
+static void apply_levels(void) {
+    pjsua_conf_adjust_rx_level(0, g_mic_gain);
+    pjsua_conf_adjust_tx_level(0, g_out_gain);
+}
 
 void pv_last_error(char *buf, int len) {
     if (buf && len > 0) pj_ansi_snprintf(buf, len, "%s", g_last_error);
@@ -120,6 +131,7 @@ static void on_call_state(pjsua_call_id call_id, pjsip_event *e) {
     pj_ansi_snprintf(reason, sizeof(reason), "%.*s", (int)ci.last_status_text.slen, ci.last_status_text.ptr);
     if (state == PV_CALL_DISCONNECTED && call_id == g_call) {
         g_call = PJSUA_INVALID_ID;
+        g_listen_only = 0;
         if (g_acc != PJSUA_INVALID_ID) {
             pjsua_acc_del(g_acc);
             g_acc = PJSUA_INVALID_ID;
@@ -261,6 +273,7 @@ int pv_init(const pv_options *opt, pv_event_cb cb, void *ctx) {
     }
     configure_codecs();
     g_started = 1;
+    apply_levels();
     return 0;
 }
 
@@ -303,7 +316,7 @@ int pv_join(const pv_join_params *p) {
     g_last_error[0] = 0;
     tone_stop();
     audio_test_stop();
-    if (open_sound() != PJ_SUCCESS) return -5;
+    if (open_sound(PJ_TRUE) != PJ_SUCCESS) return -5;
     if (g_acc != PJSUA_INVALID_ID) {
         pjsua_acc_del(g_acc);
         g_acc = PJSUA_INVALID_ID;
@@ -354,7 +367,7 @@ int pv_join(const pv_join_params *p) {
         g_call = PJSUA_INVALID_ID;
         return -4;
     }
-    return 0;
+    return g_listen_only ? 1 : 0;
 }
 
 void pv_leave(void) {
@@ -421,6 +434,21 @@ int pv_device_count(void) {
     return (int)pjmedia_aud_dev_count();
 }
 
+void pv_refresh_devices(void) {
+    if (!g_started || g_null_audio) return;
+    ensure_thread();
+    /* Streams already open are unaffected, but device indexes can change:
+     * when idle, go back to the defaults so a stale index can't name the
+     * wrong device (the app re-selects its saved devices by name). */
+    if (pjmedia_aud_dev_refresh() != PJ_SUCCESS) return;
+    if (g_call == PJSUA_INVALID_ID && !g_test_mode && !pjsua_snd_is_active()) {
+        pjsua_snd_dev_param prm;
+        pjsua_snd_dev_param_default(&prm);
+        prm.mode |= PJSUA_SND_DEV_NO_IMMEDIATE_OPEN;
+        pjsua_set_snd_dev2(&prm);
+    }
+}
+
 int pv_device_info(int index, pv_device *out) {
     if (!g_started) return -1;
     ensure_thread();
@@ -442,23 +470,54 @@ int pv_set_devices(int capture, int playback) {
     prm.capture_dev = capture;
     prm.playback_dev = playback;
     /* Don't open the microphone just to remember the choice. */
-    if (g_call == PJSUA_INVALID_ID && !g_test_mode) prm.mode |= PJSUA_SND_DEV_NO_IMMEDIATE_OPEN;
+    int idle = g_call == PJSUA_INVALID_ID && !g_test_mode;
+    if (idle) prm.mode |= PJSUA_SND_DEV_NO_IMMEDIATE_OPEN;
     pj_status_t st = pjsua_set_snd_dev2(&prm);
     if (st != PJ_SUCCESS) {
         set_error("couldn't open the selected audio devices", st);
+        /* Mid-call or mid-test: don't leave it without sound, fall back to
+         * the defaults (or listen-only in a call). */
+        if (!idle) {
+            char err[sizeof(g_last_error)];
+            pj_ansi_strxcpy(err, g_last_error, sizeof(err));
+            open_sound(g_call != PJSUA_INVALID_ID);
+            pj_ansi_strxcpy(g_last_error, err, sizeof(g_last_error));
+        }
         return -2;
     }
+    if (!idle) g_listen_only = 0; /* opened with a microphone */
     return 0;
+}
+
+int pv_listen_only(void) {
+    return g_listen_only;
+}
+
+void pv_set_levels(float mic, float out) {
+    g_mic_gain = mic < 0 ? 0 : mic;
+    g_out_gain = out < 0 ? 0 : out;
+    if (!g_started) return;
+    ensure_thread();
+    apply_levels();
 }
 
 /* Opens the selected sound devices (what pjsua_call_make_call would do),
  * falling back to the system defaults if they can't be opened (unplugged,
  * in use, or no longer supporting our format), so a stale choice can't
- * stop calls. */
-static pj_status_t open_sound(void) {
+ * stop calls. The device list is rescanned before the last try, in case
+ * something was plugged in since. With allow_listen_only, a missing
+ * microphone opens just the speaker (g_listen_only). */
+static pj_status_t open_sound(pj_bool_t allow_listen_only) {
     int cap, play;
     pj_status_t st;
-    if (g_null_audio || pjsua_snd_is_active()) return PJ_SUCCESS;
+    g_listen_only = 0;
+    if (g_null_audio) return PJ_SUCCESS;
+    if (pjsua_snd_is_active()) {
+        /* Still open from the last call (closes after a second idle);
+         * reopen if that was a speaker-only one, there may be a mic now. */
+        pjsua_snd_dev_param cur;
+        if (pjsua_get_snd_dev2(&cur) != PJ_SUCCESS || !(cur.mode & PJSUA_SND_DEV_SPEAKER_ONLY)) return PJ_SUCCESS;
+    }
     if (pjsua_get_snd_dev(&cap, &play) != PJ_SUCCESS) {
         cap = PJMEDIA_AUD_DEFAULT_CAPTURE_DEV;
         play = PJMEDIA_AUD_DEFAULT_PLAYBACK_DEV;
@@ -468,7 +527,26 @@ static pj_status_t open_sound(void) {
         PJ_LOG(2, (THIS_FILE, "selected audio devices (%d, %d) failed to open, trying the defaults", cap, play));
         st = pjsua_set_snd_dev(PJMEDIA_AUD_DEFAULT_CAPTURE_DEV, PJMEDIA_AUD_DEFAULT_PLAYBACK_DEV);
     }
-    if (st != PJ_SUCCESS) set_error("couldn't open the microphone or speaker", st);
+    if (st != PJ_SUCCESS) {
+        PJ_LOG(2, (THIS_FILE, "default audio devices failed to open, rescanning devices"));
+        if (pjmedia_aud_dev_refresh() == PJ_SUCCESS)
+            st = pjsua_set_snd_dev(PJMEDIA_AUD_DEFAULT_CAPTURE_DEV, PJMEDIA_AUD_DEFAULT_PLAYBACK_DEV);
+    }
+    if (st != PJ_SUCCESS) {
+        set_error("couldn't open the microphone or speaker", st);
+        if (!allow_listen_only) return st;
+        pjsua_snd_dev_param prm;
+        pjsua_snd_dev_param_default(&prm);
+        prm.mode = PJSUA_SND_DEV_SPEAKER_ONLY;
+        pj_status_t st2 = pjsua_set_snd_dev2(&prm);
+        if (st2 != PJ_SUCCESS) {
+            set_error("couldn't open the speaker", st2);
+            return st2;
+        }
+        PJ_LOG(2, (THIS_FILE, "no usable microphone: joining listen-only (%s)", g_last_error));
+        g_listen_only = 1;
+        st = PJ_SUCCESS;
+    }
     return st;
 }
 
@@ -493,7 +571,7 @@ int pv_audio_test(int mode) {
     if (mode == PV_AUDIO_TEST_OFF) return 0;
     if (g_null_audio) return -3;
     g_last_error[0] = 0;
-    if (open_sound() != PJ_SUCCESS) return -4;
+    if (open_sound(PJ_FALSE) != PJ_SUCCESS) return -4;
 
     pjmedia_port *sink;
     pj_status_t st;
@@ -542,8 +620,16 @@ int pv_tone(int kind, int playback) {
         {660, 0, 220, 30, 0, 0}, {880, 0, 220, 400, 0, 0},
         {660, 0, 220, 30, 0, 0}, {880, 0, 220, 1880, 0, 0},
     };
-    const pjmedia_tone_desc *tones = kind == PV_TONE_RINGBACK ? ringback : ring;
+    const pjmedia_tone_desc *src = kind == PV_TONE_RINGBACK ? ringback : ring;
     unsigned count = kind == PV_TONE_RINGBACK ? PJ_ARRAY_SIZE(ringback) : PJ_ARRAY_SIZE(ring);
+    /* At the output volume (pv_set_levels). */
+    if (g_out_gain <= 0) return 0;
+    pjmedia_tone_desc tones[PJ_ARRAY_SIZE(ring)];
+    for (unsigned i = 0; i < count; i++) {
+        float v = (src[i].volume ? src[i].volume : PJMEDIA_TONEGEN_VOLUME) * g_out_gain;
+        tones[i] = src[i];
+        tones[i].volume = (short)(v < 1 ? 1 : v > 32767 ? 32767 : v);
+    }
 
     if (playback < 0) {
         int cap;

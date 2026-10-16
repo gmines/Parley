@@ -10,7 +10,7 @@
 //!   voiceprobe --selftest        (echo canceller the app uses, and SIP over TLS)
 //!   voiceprobe --list-devices
 //!   voiceprobe --tone ring|ringback --seconds 5   (plays a ring tone on the default output)
-//!   voiceprobe --audio-test meter|loopback --seconds 5 [--capture N --playback N]
+//!   voiceprobe --audio-test meter|loopback --seconds 5 [--capture N --playback N] [--mic-gain X]
 //!              (the settings page's microphone test: prints the level)
 
 use std::sync::mpsc;
@@ -88,6 +88,9 @@ fn main() {
         let device = |name| arg(name).map(|s| s.parse().expect("device index"));
         let engine = Engine::start(false, 1, |_| {}).expect("start engine");
         engine.set_devices(device("--capture"), device("--playback")).expect("select devices");
+        if let Some(g) = arg("--mic-gain") {
+            engine.set_levels(g.parse().expect("--mic-gain"), 1.0);
+        }
         if let Err(e) = engine.audio_test(Some(mode)) {
             eprintln!("audio test failed: {e}");
             std::process::exit(1);
@@ -106,7 +109,13 @@ fn main() {
     }
     // List the sound devices the engine sees (real audio backend), then exit.
     if std::env::args().any(|a| a == "--list-devices") {
-        let engine = Engine::start(false, 1, |_| {}).expect("start engine");
+        let verbose = std::env::var("VOICEPROBE_LOG").is_ok();
+        let engine = Engine::start(false, if verbose { 4 } else { 1 }, move |ev| {
+            if let (true, EngineEvent::Log { text, .. }) = (verbose, &ev) {
+                eprintln!("pj: {text}");
+            }
+        })
+        .expect("start engine");
         for d in engine.devices() {
             println!("{:>3}  in:{} out:{}  {}", d.index, d.inputs, d.outputs, d.name);
         }
@@ -138,7 +147,9 @@ fn main() {
     if let Some(r) = arg("--record") {
         engine.test_record(&r).expect("record file");
     }
-    engine.join(&creds, &identity).expect("join");
+    if engine.join(&creds, &identity).expect("join") {
+        println!("joined listen-only (no usable microphone)");
+    }
 
     let wait_for = |want: CallState, timeout: Duration| -> Result<(), String> {
         let deadline = Instant::now() + timeout;

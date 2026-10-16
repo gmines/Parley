@@ -157,9 +157,27 @@ func (m *Manager) Get(conv uuid.UUID) (Call, bool) {
 	return r.call(), true
 }
 
+// Decline reasons: the user chose not to join, or tried to and couldn't
+// (e.g. their app has no working audio device).
+const (
+	DeclineDeclined = "declined"
+	DeclineFailed   = "failed"
+)
+
+// ErrBadReason is returned for a decline reason other than the above.
+var ErrBadReason = errors.New("unknown decline reason")
+
 // Decline tells the other members that user won't join (their clients can
-// stop ringing, and a DM caller sees it was declined).
-func (m *Manager) Decline(ctx context.Context, user, conv uuid.UUID) error {
+// stop ringing, and a DM caller sees it was declined or failed). An empty
+// reason means DeclineDeclined.
+func (m *Manager) Decline(ctx context.Context, user, conv uuid.UUID, reason string) error {
+	switch reason {
+	case "":
+		reason = DeclineDeclined
+	case DeclineDeclined, DeclineFailed:
+	default:
+		return ErrBadReason
+	}
 	members, err := m.Authorize(ctx, user, conv)
 	if err != nil {
 		return err
@@ -167,7 +185,7 @@ func (m *Manager) Decline(ctx context.Context, user, conv uuid.UUID) error {
 	m.pub.Publish(ctx, events.Event{
 		Type:       events.CallDeclined,
 		Recipients: members,
-		Data:       map[string]uuid.UUID{"conversation_id": conv, "user_id": user},
+		Data:       map[string]any{"conversation_id": conv, "user_id": user, "reason": reason},
 	})
 	return nil
 }

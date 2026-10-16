@@ -217,13 +217,26 @@ func TestResyncAfterRestart(t *testing.T) {
 
 func TestDecline(t *testing.T) {
 	f := setup()
-	if err := f.m.Decline(context.Background(), f.bob, f.dm); err != nil {
+	if err := f.m.Decline(context.Background(), f.bob, f.dm, ""); err != nil {
 		t.Fatal(err)
 	}
-	if e := f.rec.Events()[0]; e.Type != events.CallDeclined || len(e.Recipients) != 2 {
+	e := f.rec.Events()[0]
+	if e.Type != events.CallDeclined || len(e.Recipients) != 2 {
 		t.Fatalf("decline event = %+v", e)
 	}
-	if err := f.m.Decline(context.Background(), uuid.New(), f.dm); !errors.Is(err, ErrNotMember) {
+	if got := e.Data.(map[string]any)["reason"]; got != DeclineDeclined {
+		t.Fatalf("default reason = %v", got)
+	}
+	if err := f.m.Decline(context.Background(), f.bob, f.dm, DeclineFailed); err != nil {
+		t.Fatal(err)
+	}
+	if got := f.rec.Events()[1].Data.(map[string]any)["reason"]; got != DeclineFailed {
+		t.Fatalf("failed reason = %v", got)
+	}
+	if err := f.m.Decline(context.Background(), f.bob, f.dm, "bored"); !errors.Is(err, ErrBadReason) {
+		t.Fatalf("bad reason err = %v", err)
+	}
+	if err := f.m.Decline(context.Background(), uuid.New(), f.dm, ""); !errors.Is(err, ErrNotMember) {
 		t.Fatalf("stranger decline err = %v", err)
 	}
 }

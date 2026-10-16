@@ -117,6 +117,8 @@ export interface VoiceStatus {
   conversation: string | null;
   muted: boolean;
   deafened: boolean;
+  /** In the call without a microphone (none found). */
+  listen_only: boolean;
 }
 
 export interface AudioDevice {
@@ -225,7 +227,8 @@ export const api = {
     invoke<Message>("send_message", { conversationId, content, nonce }),
   markRead: (conversationId: string, messageId: string) => invoke<void>("mark_read", { conversationId, messageId }),
 
-  voiceJoin: (conversationId: string) => invoke<Call | null>("voice_join", { conversationId }),
+  /** call: the call before we joined (null if we started it); listen_only: joined without a microphone. */
+  voiceJoin: (conversationId: string) => invoke<{ call: Call | null; listen_only: boolean }>("voice_join", { conversationId }),
   voiceLeave: () => invoke<void>("voice_leave"),
   voiceSetMute: (muted: boolean) => invoke<VoiceStatus>("voice_set_mute", { muted }),
   voiceSetDeaf: (deafened: boolean) => invoke<VoiceStatus>("voice_set_deaf", { deafened }),
@@ -234,7 +237,11 @@ export const api = {
   voiceDevices: () => invoke<{ devices: AudioDevice[] }>("voice_devices"),
   voiceSetDevices: (capture: number | null, playback: number | null) =>
     invoke<void>("voice_set_devices", { capture, playback }),
-  voiceDecline: (conversationId: string) => invoke<void>("voice_decline", { conversationId }),
+  /** reason "failed": we tried to join and couldn't (the caller is told). */
+  voiceDecline: (conversationId: string, reason?: "declined" | "failed") =>
+    invoke<void>("voice_decline", { conversationId, reason: reason ?? null }),
+  /** mic and output 0-1, boostDb 0 (off) to 15. */
+  voiceSetLevels: (mic: number, boostDb: number, output: number) => invoke<void>("voice_set_levels", { mic, boostDb, output }),
   /** Ring tone on its own output stream; null stops it. playback = device index, null = default. */
   voiceTone: (tone: "ring" | "ringback" | null, playback: number | null) => invoke<void>("voice_tone", { tone, playback }),
   voiceAudioTest: (mode: "meter" | "loopback" | null) => invoke<void>("voice_audio_test", { mode }),

@@ -94,6 +94,7 @@ pub fn run() {
             voice::voice_stats,
             voice::voice_devices,
             voice::voice_set_devices,
+            voice::voice_set_levels,
             voice::voice_decline,
             voice::voice_calls,
             commands::app_info,

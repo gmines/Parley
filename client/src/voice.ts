@@ -3,7 +3,7 @@
 // bar, the incoming-call card and the conversation call button. Audio
 // settings are in views/audio.ts.
 import { api, errorMessage, type Call, type RealtimeEvent, type VoiceCallState, type VoiceEvent, type VoiceStats } from "./api";
-import { applySavedDevices, savedPlaybackIndex } from "./audio";
+import { applyLevels, applySavedDevices, savedPlaybackIndex } from "./audio";
 import { avatar, h, toast } from "./dom";
 import { conversationTitle, store } from "./store";
 import { audioDialog } from "./views/audio";
@@ -13,11 +13,21 @@ type Listener = () => void;
 const calls = new Map<string, Call>(); // conversation id -> call in progress
 const listeners = new Set<Listener>();
 let me = "";
-let mine: { conversation: string | null; state: VoiceCallState; muted: boolean; deafened: boolean; stats: VoiceStats | null; since: number } = {
+let mine: {
+  conversation: string | null;
+  state: VoiceCallState;
+  muted: boolean;
+  deafened: boolean;
+  /** In the call without a microphone: nobody hears us until one's selected. */
+  listenOnly: boolean;
+  stats: VoiceStats | null;
+  since: number;
+} = {
   conversation: null,
   state: "idle",
   muted: false,
   deafened: false,
+  listenOnly: false,
   stats: null,
   since: 0,
 };
@@ -77,11 +87,21 @@ export const voice = {
       calls.clear();
       for (const c of list) calls.set(c.conversation_id, c);
       const st = await api.voiceStatus();
-      mine = { ...mine, conversation: st.conversation, muted: st.muted, deafened: st.deafened };
+      mine = { ...mine, conversation: st.conversation, muted: st.muted, deafened: st.deafened, listenOnly: st.listen_only };
       changed();
     } catch {
       // voice not configured on this server, or offline: leave as is
     }
+  },
+
+  /** Re-reads mute / listen-only from the engine (after a device change). */
+  async refreshStatus() {
+    const st = await api.voiceStatus().catch(() => null);
+    if (!st || !mine.conversation) return;
+    const gotMic = mine.listenOnly && !st.listen_only;
+    mine = { ...mine, muted: st.muted, deafened: st.deafened, listenOnly: st.listen_only };
+    if (gotMic) toast("Microphone connected: others can hear you now.");
+    changed();
   },
 
   async join(conversationId: string) {
@@ -97,25 +117,32 @@ export const voice = {
     try {
       // If the saved devices can't be selected, the engine falls back to the defaults.
       await applySavedDevices().catch(() => {});
-      await api.voiceJoin(conversationId);
+      const r = await api.voiceJoin(conversationId);
+      mine = { ...mine, listenOnly: r.listen_only };
+      changed();
+      if (r.listen_only) {
+        toast("No microphone found: you've joined listen-only. Connect one and pick it in Audio settings (⚙) so others can hear you.", "error");
+      }
       if (starting && mine.conversation === conversationId) startRingback(conversationId);
     } catch (e) {
-      mine = { ...mine, conversation: null, state: "idle" };
+      mine = { ...mine, conversation: null, state: "idle", listenOnly: false };
       changed();
       toast(`Couldn't join the call: ${errorMessage(e)}`, "error");
+      // Answering someone's call: tell them we tried, so they stop waiting (#6).
+      if (!starting) api.voiceDecline(conversationId, "failed").catch(() => {});
     }
   },
 
   async leave() {
     stopRingback();
     await api.voiceLeave().catch(() => {});
-    mine = { ...mine, conversation: null, state: "idle", stats: null };
+    mine = { ...mine, conversation: null, state: "idle", listenOnly: false, stats: null };
     stopStats();
     changed();
   },
 
   async toggleMute() {
-    const st = await api.voiceSetMute(!(mine.muted || mine.deafened));
+    const st = await api.voiceSetMute(!mine.muted);
     mine = { ...mine, muted: st.muted, deafened: st.deafened };
     changed();
   },
@@ -153,14 +180,19 @@ export const voice = {
         calls.delete(e.data.conversation_id);
         stopRinging(e.data.conversation_id);
         break;
-      case "call.declined":
-        if (e.data.user_id === me) stopRinging(e.data.conversation_id);
-        else if (voice.inCall(e.data.conversation_id) && store.get(e.data.conversation_id)?.kind === "dm") {
-          toast(`${nameOf(e.data.conversation_id, e.data.user_id)} declined the call.`);
+      case "call.declined": {
+        const conv = e.data.conversation_id;
+        const failed = e.data.reason === "failed";
+        if (e.data.user_id === me) stopRinging(conv);
+        else if (voice.inCall(conv) && (store.get(conv)?.kind === "dm" || failed)) {
+          const who = nameOf(conv, e.data.user_id);
+          if (failed) toast(`${who} tried to join but couldn't (a problem with their audio or connection).`, "error");
+          else toast(`${who} declined the call.`);
           // Like a phone: a declined 1:1 call ends, unless they'd already answered.
-          if (ringback?.conversation === e.data.conversation_id) voice.leave();
+          if (ringback?.conversation === conv && store.get(conv)?.kind === "dm") voice.leave();
         }
         break;
+      }
       default:
         return;
     }
@@ -173,7 +205,7 @@ export const voice = {
     if (e.state === "ended") {
       const failed = e.status >= 400 && mine.state !== "connected";
       if (failed && mine.conversation) toast(`Call failed: ${e.reason || `error ${e.status}`}`, "error");
-      mine = { ...mine, conversation: null, state: "idle", stats: null };
+      mine = { ...mine, conversation: null, state: "idle", listenOnly: false, stats: null };
       stopStats();
       stopRingback();
     } else {
@@ -188,7 +220,7 @@ export const voice = {
 
   reset() {
     calls.clear();
-    mine = { conversation: null, state: "idle", muted: false, deafened: false, stats: null, since: 0 };
+    mine = { conversation: null, state: "idle", muted: false, deafened: false, listenOnly: false, stats: null, since: 0 };
     stopStats();
     if (ringing) stopRinging(ringing.conversation);
     stopRingback();
@@ -298,6 +330,7 @@ async function updateTone() {
   const seq = ++toneSeq;
   webTone?.();
   webTone = null;
+  if (want) await applyLevels().catch(() => {}); // tones play at the output volume
   const playback = want ? await savedPlaybackIndex() : null;
   if (seq !== toneSeq) return; // changed again meanwhile: a newer call handles it
   try {
@@ -393,7 +426,9 @@ export function callBar(onOpen: (conversationId: string) => void): HTMLElement {
       h(
         "div",
         { class: "call-bar-actions" },
-        iconBtn(mine.muted || mine.deafened ? "Unmute" : "Mute", mine.muted || mine.deafened ? "🔇" : "🎤", mine.muted || mine.deafened, () => voice.toggleMute()),
+        mine.listenOnly
+          ? iconBtn("No microphone: others can't hear you. Open audio settings to pick one.", "🚫", true, () => audioDialog())
+          : iconBtn(mine.muted ? "Unmute" : "Mute", mine.muted ? "🔇" : "🎤", mine.muted, () => voice.toggleMute()),
         iconBtn(mine.deafened ? "Undeafen" : "Deafen", mine.deafened ? "🙉" : "🎧", mine.deafened, () => voice.toggleDeafen()),
         iconBtn("Audio settings", "⚙", false, () => audioDialog()),
         iconBtn("Leave call", "✕", false, () => voice.leave(), "call-leave"),

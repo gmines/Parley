@@ -65,6 +65,8 @@ func mapErr(err error) error {
 		return httpx.NewError(http.StatusNotFound, "conversation_not_found", err.Error())
 	case errors.Is(err, calls.ErrCannotCall):
 		return httpx.NewError(http.StatusForbidden, "cannot_call", err.Error())
+	case errors.Is(err, calls.ErrBadReason):
+		return httpx.NewError(http.StatusBadRequest, "bad_request", err.Error())
 	}
 	return err
 }
@@ -134,7 +136,16 @@ func (s *Server) decline(w http.ResponseWriter, r *http.Request) error {
 	if err != nil {
 		return err
 	}
-	if err := s.Calls.Decline(r.Context(), caller(r), conv); err != nil {
+	// Optional body: {"reason": "declined" | "failed"} (older clients send none).
+	var req struct {
+		Reason string `json:"reason"`
+	}
+	if r.ContentLength != 0 {
+		if err := httpx.DecodeJSON(w, r, &req); err != nil {
+			return err
+		}
+	}
+	if err := s.Calls.Decline(r.Context(), caller(r), conv, req.Reason); err != nil {
 		return mapErr(err)
 	}
 	w.WriteHeader(http.StatusNoContent)

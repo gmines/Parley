@@ -25,6 +25,9 @@ pub struct VoiceState {
     conversation: Option<String>,
     muted: bool,
     deafened: bool,
+    /// In a call without a microphone (none found): others can't hear us
+    /// until one is selected.
+    listen_only: bool,
 }
 
 fn internal(e: impl std::fmt::Display) -> AppError {
@@ -47,7 +50,9 @@ fn engine(app: &AppHandle) -> Result<&'static Engine> {
         EngineEvent::Call { state, status, reason } => {
             if state == CallState::Ended {
                 if let Some(v) = tauri::Manager::try_state::<AppState>(&app) {
-                    v.voice.state.lock().unwrap().conversation = None;
+                    let mut s = v.voice.state.lock().unwrap();
+                    s.conversation = None;
+                    s.listen_only = false;
                 }
             }
             let _ = app.emit("voice-event", json!({ "type": "state", "state": state, "status": status, "reason": reason }));
@@ -83,7 +88,8 @@ fn conv_id(s: &str) -> Result<&str> {
 }
 
 /// Joins the conversation's call (starting it if nobody's in it yet).
-/// Returns the call's state before we joined (null if we're starting it).
+/// Returns `call`, the call's state before we joined (null if we're starting
+/// it), and `listen_only` (joined without a microphone).
 #[tauri::command]
 pub async fn voice_join(app: AppHandle, state: State<'_, AppState>, conversation_id: String) -> Result<Value> {
     let conv = conv_id(&conversation_id)?;
@@ -103,12 +109,14 @@ pub async fn voice_join(app: AppHandle, state: State<'_, AppState>, conversation
 
     {
         let s = state.voice.state.lock().unwrap();
-        eng.set_mute(s.muted || s.deafened);
+        eng.set_mute(s.muted);
         eng.set_deaf(s.deafened);
     }
-    eng.join(&creds, &user.id).map_err(internal)?;
-    state.voice.state.lock().unwrap().conversation = Some(conv.to_string());
-    Ok(resp["call"].clone())
+    let listen_only = eng.join(&creds, &user.id).map_err(internal)?;
+    let mut s = state.voice.state.lock().unwrap();
+    s.conversation = Some(conv.to_string());
+    s.listen_only = listen_only;
+    Ok(json!({ "call": resp["call"], "listen_only": listen_only }))
 }
 
 #[tauri::command]
@@ -116,7 +124,9 @@ pub fn voice_leave(state: State<'_, AppState>) {
     if let Some(e) = Engine::get() {
         e.leave();
     }
-    state.voice.state.lock().unwrap().conversation = None;
+    let mut s = state.voice.state.lock().unwrap();
+    s.conversation = None;
+    s.listen_only = false;
 }
 
 /// Mute: stop sending the microphone.
@@ -124,14 +134,11 @@ pub fn voice_leave(state: State<'_, AppState>) {
 pub fn voice_set_mute(state: State<'_, AppState>, muted: bool) -> VoiceState {
     let mut s = state.voice.state.lock().unwrap();
     s.muted = muted;
-    if !muted {
-        s.deafened = false; // unmuting also undeafens, like most chat apps
-    }
     apply(&s);
     s.clone()
 }
 
-/// Deafen: stop playing others' audio (and mute, since you can't hear replies).
+/// Deafen: stop playing others' audio. Independent of mute (#9).
 #[tauri::command]
 pub fn voice_set_deaf(state: State<'_, AppState>, deafened: bool) -> VoiceState {
     let mut s = state.voice.state.lock().unwrap();
@@ -142,7 +149,7 @@ pub fn voice_set_deaf(state: State<'_, AppState>, deafened: bool) -> VoiceState 
 
 fn apply(s: &VoiceState) {
     if let Some(e) = Engine::get() {
-        e.set_mute(s.muted || s.deafened);
+        e.set_mute(s.muted);
         e.set_deaf(s.deafened);
     }
 }
@@ -168,9 +175,25 @@ pub fn voice_devices(app: AppHandle) -> Result<Devices> {
 }
 
 /// Selects audio devices by index (from voice_devices); null = system default.
+/// In a listen-only call, selecting a working microphone makes it a normal
+/// one (voice_status tells).
 #[tauri::command]
-pub fn voice_set_devices(app: AppHandle, capture: Option<i32>, playback: Option<i32>) -> Result<()> {
-    engine(&app)?.set_devices(capture, playback).map_err(internal)
+pub fn voice_set_devices(app: AppHandle, state: State<'_, AppState>, capture: Option<i32>, playback: Option<i32>) -> Result<()> {
+    let eng = engine(&app)?;
+    let result = eng.set_devices(capture, playback).map_err(internal);
+    let mut s = state.voice.state.lock().unwrap();
+    if s.conversation.is_some() {
+        s.listen_only = eng.listen_only();
+    }
+    result
+}
+
+/// Microphone volume (0-1), boost in dB (0 = off) and output volume (0-1).
+#[tauri::command]
+pub fn voice_set_levels(app: AppHandle, mic: f32, boost_db: f32, output: f32) -> Result<()> {
+    let mic = mic.clamp(0.0, 1.0) * 10f32.powf(boost_db.clamp(0.0, 20.0) / 20.0);
+    engine(&app)?.set_levels(mic, output.clamp(0.0, 1.0));
+    Ok(())
 }
 
 /// Starts (or with null, stops) a ring tone: "ringback" while we're calling,
@@ -194,11 +217,13 @@ pub fn voice_mic_level(app: AppHandle) -> Result<i32> {
 }
 
 /// Declines a ringing call (the others' clients stop ringing for us).
+/// `reason`: "declined" (default) or "failed" (we tried to join and couldn't).
 #[tauri::command]
-pub async fn voice_decline(state: State<'_, AppState>, conversation_id: String) -> Result<()> {
+pub async fn voice_decline(state: State<'_, AppState>, conversation_id: String, reason: Option<String>) -> Result<()> {
     let conv = conv_id(&conversation_id)?;
     let base = voice_base(&state).await?;
-    state.session.call_empty_at(&base, Method::POST, &format!("v1/calls/{conv}/decline"), None).await
+    let body = reason.map(|r| json!({ "reason": r }));
+    state.session.call_empty_at(&base, Method::POST, &format!("v1/calls/{conv}/decline"), body).await
 }
 
 /// Calls in progress in your conversations (for resync after reconnecting).

@@ -1,8 +1,10 @@
 // Audio device choices, saved by name (device indexes can change between
-// runs) and applied to the voice engine before a call or an audio test.
+// runs), and volume levels: applied to the voice engine before a call or an
+// audio test.
 import { api, type AudioDevice } from "./api";
 
 const DEVICE_KEY = "parley.audioDevices";
+const LEVELS_KEY = "parley.audioLevels";
 
 export interface DeviceChoice {
   capture: string | null;
@@ -25,9 +27,48 @@ export function saveDevices(choice: DeviceChoice) {
   }
 }
 
-/** Selects the saved devices in the engine (system default where none is
- * saved or the saved one is gone). */
+export interface Levels {
+  /** Microphone volume, 0-100. */
+  mic: number;
+  /** Microphone boost in dB: 0 (off), 5, 10 or 15. */
+  boost: number;
+  /** Output (speaker / headphones) volume, 0-100. */
+  output: number;
+}
+
+export const BOOST_STEPS = [0, 5, 10, 15];
+
+export function savedLevels(): Levels {
+  const def: Levels = { mic: 100, boost: 0, output: 100 };
+  try {
+    const v = JSON.parse(localStorage.getItem(LEVELS_KEY) || "null");
+    const num = (x: unknown, lo: number, hi: number, d: number) => (typeof x === "number" && x >= lo && x <= hi ? x : d);
+    return v
+      ? { mic: num(v.mic, 0, 100, 100), boost: BOOST_STEPS.includes(v.boost) ? v.boost : 0, output: num(v.output, 0, 100, 100) }
+      : def;
+  } catch {
+    return def;
+  }
+}
+
+export function saveLevels(levels: Levels) {
+  try {
+    localStorage.setItem(LEVELS_KEY, JSON.stringify(levels));
+  } catch {
+    // storage unavailable: applies to this session only
+  }
+}
+
+/** Sets the saved volume levels in the engine (they apply right away, also mid-call). */
+export function applyLevels(levels = savedLevels()): Promise<void> {
+  return api.voiceSetLevels(levels.mic / 100, levels.boost, levels.output / 100);
+}
+
+/** Selects the saved devices and levels in the engine (system default where
+ * no device is saved or the saved one is gone). Listing the devices also
+ * rescans them, so ones plugged in since are found. */
 export async function applySavedDevices() {
+  await applyLevels().catch(() => {});
   const saved = savedDevices();
   const { devices } = await api.voiceDevices();
   const find = (name: string | null, kind: "inputs" | "outputs") => devices.find((x) => x.name === name && x[kind] > 0)?.index ?? null;

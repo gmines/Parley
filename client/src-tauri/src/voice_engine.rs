@@ -70,6 +70,9 @@ extern "C" {
     fn pv_last_error(buf: *mut c_char, len: c_int);
     fn pv_audio_test(mode: c_int) -> c_int;
     fn pv_mic_level() -> c_int;
+    fn pv_refresh_devices();
+    fn pv_listen_only() -> c_int;
+    fn pv_set_levels(mic: f32, out: f32);
 }
 
 /// Ring tones ([`Engine::tone`]).
@@ -184,7 +187,9 @@ impl Engine {
 
     /// Joins the room the credentials are for. The result arrives as
     /// [`EngineEvent::Call`] events.
-    pub fn join(&self, creds: &SipCredentials, identity: &str) -> Result<(), String> {
+    /// Makes the call. `Ok(true)`: there's no usable microphone, so the call
+    /// is listen-only until [`Engine::set_devices`] opens one.
+    pub fn join(&self, creds: &SipCredentials, identity: &str) -> Result<bool, String> {
         let c = |s: &str| CString::new(s).map_err(|_| "credentials contain a NUL byte".to_string());
         let (uri, proxy, realm, user, pass, id) =
             (c(&creds.uri)?, c(&creds.proxy)?, c(&creds.realm)?, c(&creds.username)?, c(&creds.password)?, c(identity)?);
@@ -197,7 +202,8 @@ impl Engine {
             identity: id.as_ptr(),
         };
         match unsafe { pv_join(&p) } {
-            0 => Ok(()),
+            0 => Ok(false),
+            1 => Ok(true),
             -2 => Err("already in a call".into()),
             -5 => Err(sound_error()),
             rc => Err(last_error().unwrap_or_else(|| format!("couldn't start the call (code {rc})"))),
@@ -241,7 +247,10 @@ impl Engine {
         })
     }
 
+    /// The system's audio devices, rescanned first so devices plugged in
+    /// since the last call show up. Indexes can change between calls.
     pub fn devices(&self) -> Vec<Device> {
+        unsafe { pv_refresh_devices() };
         let n = unsafe { pv_device_count() };
         (0..n)
             .filter_map(|i| {
@@ -281,6 +290,17 @@ impl Engine {
     /// The microphone's level, 0-255 (0 when it isn't open).
     pub fn mic_level(&self) -> i32 {
         unsafe { pv_mic_level() }
+    }
+
+    /// Whether the current call is listen-only (no microphone).
+    pub fn listen_only(&self) -> bool {
+        unsafe { pv_listen_only() != 0 }
+    }
+
+    /// Microphone and output volume as multipliers (1.0 = unchanged; the
+    /// microphone can go above 1 to boost it).
+    pub fn set_levels(&self, mic: f32, out: f32) {
+        unsafe { pv_set_levels(mic, out) }
     }
 
     /// Plays a looping ring tone on its own output stream (`None` stops it),
