@@ -1,5 +1,21 @@
 import { api, errorMessage, type AudioDevice } from "../api";
-import { applyLevels, applySavedDevices, BOOST_STEPS, friendlyName, savedDevices, saveDevices, savedLevels, saveLevels } from "../audio";
+import {
+  applyLevels,
+  applySavedDevices,
+  AUTO_LEAVE_STEPS,
+  BOOST_STEPS,
+  friendlyName,
+  MESSAGE_SOUNDS,
+  playMessageSound,
+  saveAutoLeave,
+  savedAutoLeave,
+  savedDevices,
+  saveDevices,
+  savedLevels,
+  savedMessageSounds,
+  saveLevels,
+  saveMessageSounds,
+} from "../audio";
 import { h } from "../dom";
 import { voice } from "../voice";
 
@@ -37,12 +53,17 @@ export function audioPanel(): { el: HTMLElement; dispose: () => void } {
   const outVol = slider("f-out-vol", levels.output);
   const micVolLabel = h("span", { class: "range-value" });
   const outVolLabel = h("span", { class: "range-value" });
-  const boost = h("select", { class: "select select-sm", attrs: { id: "f-boost", title: "Raises a quiet microphone. Off unless you need it." } }) as HTMLSelectElement;
-  for (const db of BOOST_STEPS) {
-    const o = h("option", { text: db ? `+${db} dB` : "Off", attrs: { value: String(db) } });
-    if (db === levels.boost) o.selected = true;
-    boost.append(o);
-  }
+  const boostSelect = (id: string, value: number, title: string) => {
+    const s = h("select", { class: "select select-sm", attrs: { id, title } }) as HTMLSelectElement;
+    for (const db of BOOST_STEPS) {
+      const o = h("option", { text: db ? `+${db} dB` : "Off", attrs: { value: String(db) } });
+      if (db === value) o.selected = true;
+      s.append(o);
+    }
+    return s;
+  };
+  const boost = boostSelect("f-boost", levels.boost, "Raises a quiet microphone. Off unless you need it.");
+  const outBoost = boostSelect("f-out-boost", levels.outputBoost, "Raises quiet voices above full volume. Off unless you need it: loud voices may distort.");
   const error = h("p", { class: "form-error", attrs: { role: "alert" } });
   const testMic = h("button", { class: "btn btn-sm btn-ghost", attrs: { type: "button" } });
   const loopback = h("input", { attrs: { type: "checkbox", id: "f-loopback" } });
@@ -65,12 +86,12 @@ export function audioPanel(): { el: HTMLElement; dispose: () => void } {
   };
   const levelsChanged = () => {
     showLevels();
-    const l = { mic: Number(micVol.value), boost: Number(boost.value), output: Number(outVol.value) };
+    const l = { mic: Number(micVol.value), boost: Number(boost.value), output: Number(outVol.value), outputBoost: Number(outBoost.value) };
     saveLevels(l);
     applyLevels(l).catch((e) => (error.textContent = errorMessage(e)));
   };
   for (const el of [micVol, outVol]) el.addEventListener("input", levelsChanged);
-  boost.addEventListener("change", levelsChanged);
+  for (const el of [boost, outBoost]) el.addEventListener("change", levelsChanged);
   showLevels();
 
   const render = () => {
@@ -158,6 +179,7 @@ export function audioPanel(): { el: HTMLElement; dispose: () => void } {
     h("div", { class: "audio-actions" }, testMic, loopbackField),
     h("label", { class: "field", attrs: { for: "f-out" } }, h("span", { text: "Speakers / headphones" }), out),
     h("div", { class: "range-row" }, h("label", { attrs: { for: "f-out-vol" }, text: "Volume" }), outVol, outVolLabel),
+    h("div", { class: "range-row" }, h("label", { attrs: { for: "f-out-boost" }, text: "Boost" }), outBoost),
     h("div", { class: "audio-actions" }, testOut),
     hint,
     error,
@@ -206,6 +228,71 @@ export function audioPanel(): { el: HTMLElement; dispose: () => void } {
       if (testing) api.voiceAudioTest(null).catch(() => {});
     },
   };
+}
+
+/** Message sounds (#14): on/off, which sound, its volume, and a preview. */
+export function messageSoundsPanel(): HTMLElement {
+  const s = savedMessageSounds();
+  const enabled = h("input", { attrs: { type: "checkbox", id: "f-msg-sound-on" } }) as HTMLInputElement;
+  enabled.checked = s.enabled;
+  const sound = h("select", { class: "select select-sm", attrs: { id: "f-msg-sound" } }) as HTMLSelectElement;
+  for (const m of MESSAGE_SOUNDS) {
+    const o = h("option", { text: m.label, attrs: { value: m.id } });
+    if (m.id === s.sound) o.selected = true;
+    sound.append(o);
+  }
+  const volume = h("input", { class: "range", attrs: { type: "range", id: "f-msg-vol", min: "0", max: "100", step: "1", value: String(s.volume) } }) as HTMLInputElement;
+  const volumeLabel = h("span", { class: "range-value" });
+  const preview = h("button", { class: "btn btn-sm btn-ghost", attrs: { type: "button" }, text: "Play" });
+
+  const current = () => ({ enabled: enabled.checked, sound: sound.value as (typeof MESSAGE_SOUNDS)[number]["id"], volume: Number(volume.value) });
+  const render = () => {
+    volumeLabel.textContent = `${volume.value}%`;
+    for (const el of [sound, volume, preview]) el.disabled = !enabled.checked;
+  };
+  const changed = () => {
+    saveMessageSounds(current());
+    render();
+  };
+  enabled.addEventListener("change", changed);
+  sound.addEventListener("change", () => {
+    changed();
+    playMessageSound(current());
+  });
+  volume.addEventListener("input", changed);
+  volume.addEventListener("change", () => playMessageSound(current()));
+  preview.addEventListener("click", () => playMessageSound(current()));
+  render();
+
+  return h(
+    "div",
+    { class: "audio-panel" },
+    h("label", { class: "check", attrs: { for: "f-msg-sound-on" } }, enabled, h("span", { text: "Play a sound for new messages" })),
+    h("div", { class: "range-row" }, h("label", { attrs: { for: "f-msg-sound" }, text: "Sound" }), sound, preview),
+    h("div", { class: "range-row" }, h("label", { attrs: { for: "f-msg-vol" }, text: "Volume" }), volume, volumeLabel),
+    h("p", { class: "hint", text: "Plays on your speakers / headphones above, unless you're reading that conversation." }),
+  );
+}
+
+/** Leaving calls you've walked away from (#15). */
+export function callSettingsPanel(): HTMLElement {
+  const away = h("select", { class: "select select-sm", attrs: { id: "f-auto-leave" } }) as HTMLSelectElement;
+  const current = savedAutoLeave();
+  for (const min of AUTO_LEAVE_STEPS) {
+    const o = h("option", { text: min === 0 ? "Never" : min < 60 ? `After ${min} minutes` : `After ${min / 60} hour${min > 60 ? "s" : ""}`, attrs: { value: String(min) } });
+    if (min === current) o.selected = true;
+    away.append(o);
+  }
+  away.addEventListener("change", () => saveAutoLeave(Number(away.value)));
+  return h(
+    "div",
+    { class: "audio-panel" },
+    h("label", { class: "field", attrs: { for: "f-auto-leave" } }, h("span", { text: "Leave a call when I'm away" }), away),
+    h("p", {
+      class: "hint",
+      text: "Away means no keyboard or mouse use and a silent microphone (on Linux, unless you use GNOME: while the screen is locked). Parley also leaves after 5 minutes alone in a call. Either way, you get a minute's warning to stay. Never turns both off.",
+    }),
+  );
 }
 
 /** The audio settings in a dialog (from the call bar). */

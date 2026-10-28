@@ -3,7 +3,7 @@
 // bar, the incoming-call card and the conversation call button. Audio
 // settings are in views/audio.ts.
 import { api, errorMessage, type Call, type RealtimeEvent, type VoiceCallState, type VoiceEvent, type VoiceStats } from "./api";
-import { applyLevels, applySavedDevices, savedPlaybackIndex } from "./audio";
+import { applyLevels, applySavedDevices, savedAutoLeave, savedPlaybackIndex } from "./audio";
 import { avatar, h, toast } from "./dom";
 import { conversationTitle, store } from "./store";
 import { audioDialog } from "./views/audio";
@@ -135,6 +135,7 @@ export const voice = {
 
   async leave() {
     stopRingback();
+    stopAwayWatch();
     await api.voiceLeave().catch(() => {});
     mine = { ...mine, conversation: null, state: "idle", listenOnly: false, stats: null };
     stopStats();
@@ -208,11 +209,13 @@ export const voice = {
       mine = { ...mine, conversation: null, state: "idle", listenOnly: false, stats: null };
       stopStats();
       stopRingback();
+      stopAwayWatch();
     } else {
       mine = { ...mine, state: e.state };
       if (e.state === "connected") {
         mine.since = Date.now();
         startStats();
+        startAwayWatch();
       }
     }
     changed();
@@ -224,6 +227,7 @@ export const voice = {
     stopStats();
     if (ringing) stopRinging(ringing.conversation);
     stopRingback();
+    stopAwayWatch();
     changed();
   },
 };
@@ -241,6 +245,116 @@ function startStats() {
 function stopStats() {
   window.clearInterval(statsTimer);
   statsTimer = undefined;
+}
+
+// Leaving abandoned calls (#15) ------------------------------------------------------
+// A call ends by itself once we've been away for the chosen time (no input
+// on the computer and a silent microphone), or alone in it for 5 minutes,
+// after a minute's warning that brings the window back.
+
+const ALONE_LEAVE_MS = 5 * 60_000;
+const WARNING_S = 60;
+const IDLE_POLL_MS = 15_000;
+const MIC_POLL_MS = 2_000;
+/** pv_mic_level counted as speech (full scale reads about 127). */
+const MIC_ACTIVE = 20;
+
+let away: {
+  lastActive: number;
+  aloneSince: number;
+  timers: number[];
+  warning: { card: HTMLElement; timer: number } | null;
+} | null = null;
+
+const markActive = () => {
+  if (away) away.lastActive = Date.now();
+};
+const APP_INPUT = ["keydown", "pointerdown", "pointermove", "wheel"] as const;
+
+function startAwayWatch() {
+  stopAwayWatch();
+  const now = Date.now();
+  away = { lastActive: now, aloneSince: 0, timers: [], warning: null };
+  for (const ev of APP_INPUT) window.addEventListener(ev, markActive, { passive: true });
+  away.timers.push(
+    window.setInterval(async () => {
+      const level = await api.voiceMicLevel().catch(() => 0);
+      if (level >= MIC_ACTIVE) markActive();
+    }, MIC_POLL_MS),
+    window.setInterval(checkAway, IDLE_POLL_MS),
+  );
+}
+
+function stopAwayWatch() {
+  if (!away) return;
+  for (const t of away.timers) window.clearInterval(t);
+  for (const ev of APP_INPUT) window.removeEventListener(ev, markActive);
+  dismissWarning();
+  away = null;
+}
+
+/** Nobody else is in our call (unknown, e.g. offline, counts as not alone). */
+function alone(): boolean {
+  const c = mine.conversation ? calls.get(mine.conversation) : undefined;
+  return !!c && !c.participants.some((p) => p !== me);
+}
+
+async function checkAway() {
+  if (!away || away.warning) return;
+  const minutes = savedAutoLeave();
+  if (minutes === 0) return;
+  const idle = await api.systemIdle().catch(() => null);
+  if (!away || away.warning) return;
+  const now = Date.now();
+  // Where the OS can't say how long it's been idle, only a locked screen
+  // counts as away: never leave a call someone may be using.
+  if (idle?.seconds != null) away.lastActive = Math.max(away.lastActive, now - idle.seconds * 1000);
+  else if (!idle?.locked) away.lastActive = now;
+  away.aloneSince = alone() ? away.aloneSince || now : 0;
+
+  if (away.aloneSince && now - away.aloneSince >= ALONE_LEAVE_MS) warn("alone");
+  else if (now - away.lastActive >= minutes * 60_000) warn("away");
+}
+
+function warn(reason: "alone" | "away") {
+  if (!away) return;
+  let left = WARNING_S;
+  const text = h("span", { class: "row-sub" });
+  const still = () => (reason === "alone" ? alone() : Date.now() - away!.lastActive > 5_000);
+  const update = () => (text.textContent = `Leaving in ${left} s`);
+  const stay = () => {
+    if (!away) return;
+    away.lastActive = Date.now();
+    away.aloneSince = 0;
+    dismissWarning();
+  };
+  const card = h(
+    "div",
+    { class: "ring-card", attrs: { role: "alertdialog", "aria-label": "Still in the call?" } },
+    h("div", { class: "row-text" }, h("span", { class: "row-name", text: reason === "alone" ? "You're the only one in this call" : "Still in the call?" }), text),
+    h("button", { class: "btn btn-sm btn-ok", text: "Stay", on: { click: stay } }),
+    h("button", { class: "btn btn-sm btn-danger", text: "Leave now", on: { click: () => voice.leave() } }),
+  );
+  update();
+  document.body.append(card);
+  const timer = window.setInterval(() => {
+    if (!still()) return dismissWarning(); // someone joined, or we're back
+    if (--left > 0) return update();
+    voice.leave();
+    toast(reason === "alone" ? "You left the call: nobody else was in it." : "You left the call: you seemed to be away.");
+  }, 1000);
+  away.warning = { card, timer };
+  api.requestAttention().catch(() => {});
+  savedPlaybackIndex()
+    .then((playback) => api.voiceNotify("ding", 0.8, playback))
+    .catch(() => {});
+}
+
+function dismissWarning() {
+  if (!away?.warning) return;
+  window.clearInterval(away.warning.timer);
+  away.warning.card.remove();
+  away.warning = null;
 }
 
 /** "good" / "fair" / "poor" from packet loss, round-trip time and jitter. */

@@ -36,6 +36,13 @@ pub fn incoming_call(app: &AppHandle) {
     let _ = w.request_user_attention(Some(tauri::UserAttentionType::Critical));
 }
 
+/// Brings the window back and asks for attention, like an incoming call:
+/// about to leave a call the user seems to have walked away from.
+#[tauri::command]
+pub fn request_attention(app: AppHandle) {
+    incoming_call(&app);
+}
+
 fn keep_running(app: &AppHandle) -> bool {
     CAN_HIDE.load(Ordering::Relaxed) && app.state::<AppState>().config.load().run_in_background.unwrap_or(true)
 }

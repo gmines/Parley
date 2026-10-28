@@ -121,6 +121,8 @@ export interface VoiceStatus {
   listen_only: boolean;
 }
 
+export type MessageSound = "chime" | "pop" | "ding" | "soft";
+
 export interface AudioDevice {
   index: number;
   name: string;
@@ -240,13 +242,20 @@ export const api = {
   /** reason "failed": we tried to join and couldn't (the caller is told). */
   voiceDecline: (conversationId: string, reason?: "declined" | "failed") =>
     invoke<void>("voice_decline", { conversationId, reason: reason ?? null }),
-  /** mic and output 0-1, boostDb 0 (off) to 15. */
-  voiceSetLevels: (mic: number, boostDb: number, output: number) => invoke<void>("voice_set_levels", { mic, boostDb, output }),
+  /** mic and output 0-1, each boost 0 (off) to 15 dB. */
+  voiceSetLevels: (mic: number, boostDb: number, output: number, outputBoostDb: number) =>
+    invoke<void>("voice_set_levels", { mic, boostDb, output, outputBoostDb }),
   /** Ring tone on its own output stream; null stops it. playback = device index, null = default. */
   voiceTone: (tone: "ring" | "ringback" | null, playback: number | null) => invoke<void>("voice_tone", { tone, playback }),
+  /** A message sound, played once. volume 0-1; playback = device index, null = default. */
+  voiceNotify: (sound: MessageSound, volume: number, playback: number | null) => invoke<void>("voice_notify", { sound, volume, playback }),
   voiceAudioTest: (mode: "meter" | "loopback" | null) => invoke<void>("voice_audio_test", { mode }),
   voiceMicLevel: () => invoke<number>("voice_mic_level"),
   voiceCalls: () => invoke<Call[]>("voice_calls"),
+  /** Time since the last keyboard / mouse input (null where the OS won't say) and whether the screen is locked. */
+  systemIdle: () => invoke<{ seconds: number | null; locked: boolean }>("system_idle"),
+  /** Shows the window and flashes it, as for an incoming call. */
+  requestAttention: () => invoke<void>("request_attention"),
 
   listFriends: () => invoke<Friend[]>("list_friends"),
   removeFriend: (userId: string) => invoke<void>("remove_friend", { userId }),

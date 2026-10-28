@@ -73,6 +73,20 @@ enum pv_tone_kind {
  * default output), replacing any other; PV_TONE_NONE stops it. 0 = ok. */
 int pv_tone(int kind, int playback);
 
+/* Message notification sounds (pv_notify): short, played once. */
+enum pv_sound_kind {
+    PV_SOUND_CHIME = 1,
+    PV_SOUND_POP = 2,
+    PV_SOUND_DING = 3,
+    PV_SOUND_SOFT = 4,
+};
+/* Plays a sound once on an output-only stream of its own (`playback` as for
+ * pv_tone), at `volume` 0-1 (independent of pv_set_levels), replacing any
+ * sound still playing. Returns its length in ms, or < 0 on error; call
+ * pv_notify_stop after that long to close the stream. */
+int pv_notify(int kind, float volume, int playback);
+void pv_notify_stop(void);
+
 /* 1 if SIP over TLS is available (needs pv_init): tell the server so. */
 int pv_has_tls(void);
 
@@ -116,9 +130,10 @@ int pv_audio_test(int mode);
 /* Microphone level, 0-255, while the test or a call has it open. */
 int pv_mic_level(void);
 
-/* Volume: multipliers for the microphone (1.0 = as captured, above 1 boosts,
- * the bridge clips) and for everything played (calls, tones, loopback).
- * Kept across calls and device changes. */
+/* Volume: multipliers for the microphone and for what calls and the audio
+ * test play (1.0 = unchanged; above 1 boosts, and the bridge clips). Ring
+ * tones follow the output volume up to 1.0. Kept across calls and device
+ * changes. */
 void pv_set_levels(float mic, float out);
 
 /* Test hooks: loop a WAV file into the call / record what we receive. */

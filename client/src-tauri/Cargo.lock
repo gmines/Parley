@@ -2906,6 +2906,7 @@ version = "0.8.0"
 dependencies = [
  "cc",
  "chrono",
+ "dbus",
  "futures-util",
  "keyring",
  "log",

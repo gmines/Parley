@@ -12,7 +12,7 @@ use url::Url;
 
 use crate::commands::AppState;
 use crate::error::{AppError, Result};
-use crate::voice_engine::{AudioTest, CallState, Device, Engine, EngineEvent, SipCredentials, Stats, Tone};
+use crate::voice_engine::{AudioTest, CallState, Device, Engine, EngineEvent, SipCredentials, Sound, Stats, Tone};
 
 #[derive(Default)]
 pub struct Voice {
@@ -188,11 +188,11 @@ pub fn voice_set_devices(app: AppHandle, state: State<'_, AppState>, capture: Op
     result
 }
 
-/// Microphone volume (0-1), boost in dB (0 = off) and output volume (0-1).
+/// Microphone and output volume (0-1), each with a boost in dB (0 = off).
 #[tauri::command]
-pub fn voice_set_levels(app: AppHandle, mic: f32, boost_db: f32, output: f32) -> Result<()> {
-    let mic = mic.clamp(0.0, 1.0) * 10f32.powf(boost_db.clamp(0.0, 20.0) / 20.0);
-    engine(&app)?.set_levels(mic, output.clamp(0.0, 1.0));
+pub fn voice_set_levels(app: AppHandle, mic: f32, boost_db: f32, output: f32, output_boost_db: f32) -> Result<()> {
+    let gain = |volume: f32, db: f32| volume.clamp(0.0, 1.0) * 10f32.powf(db.clamp(0.0, 20.0) / 20.0);
+    engine(&app)?.set_levels(gain(mic, boost_db), gain(output, output_boost_db));
     Ok(())
 }
 
@@ -201,6 +201,13 @@ pub fn voice_set_levels(app: AppHandle, mic: f32, boost_db: f32, output: f32) ->
 #[tauri::command]
 pub fn voice_tone(app: AppHandle, tone: Option<Tone>, playback: Option<i32>) -> Result<()> {
     engine(&app)?.tone(tone, playback).map_err(internal)
+}
+
+/// Plays a message notification sound once at `volume` (0-1).
+/// `playback` = device index, null = default.
+#[tauri::command]
+pub fn voice_notify(app: AppHandle, sound: Sound, volume: f32, playback: Option<i32>) -> Result<()> {
+    engine(&app)?.notify(sound, volume.clamp(0.0, 1.0), playback).map_err(internal)
 }
 
 /// Audio settings test: "meter" opens the microphone (see voice_mic_level),

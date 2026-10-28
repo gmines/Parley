@@ -6,7 +6,8 @@
 //! [`Engine::start`]. It handles one call at a time.
 
 use std::ffi::{c_char, c_int, c_void, CStr, CString};
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
@@ -73,7 +74,24 @@ extern "C" {
     fn pv_refresh_devices();
     fn pv_listen_only() -> c_int;
     fn pv_set_levels(mic: f32, out: f32);
+    fn pv_notify(kind: c_int, volume: f32, playback: c_int) -> c_int;
+    fn pv_notify_stop();
 }
+
+/// Message notification sounds ([`Engine::notify`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Sound {
+    Chime,
+    Pop,
+    Ding,
+    Soft,
+}
+
+/// Which message sound is playing (bumped by each [`Engine::notify`]), so a
+/// finished sound's timer doesn't stop a newer one. Also serializes
+/// pv_notify / pv_notify_stop.
+static NOTIFY_SEQ: Mutex<u64> = Mutex::new(0);
 
 /// Ring tones ([`Engine::tone`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -297,8 +315,8 @@ impl Engine {
         unsafe { pv_listen_only() != 0 }
     }
 
-    /// Microphone and output volume as multipliers (1.0 = unchanged; the
-    /// microphone can go above 1 to boost it).
+    /// Microphone and output volume as multipliers (1.0 = unchanged; above 1
+    /// boosts).
     pub fn set_levels(&self, mic: f32, out: f32) {
         unsafe { pv_set_levels(mic, out) }
     }
@@ -316,6 +334,33 @@ impl Engine {
             -2 => Err("no sound device".into()),
             rc => Err(format!("couldn't play the ring tone (code {rc})")),
         }
+    }
+
+    /// Plays a message sound once, at `volume` (0-1), on `playback` (device
+    /// index) or the call's / default output. Its stream closes when it ends.
+    pub fn notify(&self, sound: Sound, volume: f32, playback: Option<i32>) -> Result<(), String> {
+        let kind = match sound {
+            Sound::Chime => 1,
+            Sound::Pop => 2,
+            Sound::Ding => 3,
+            Sound::Soft => 4,
+        };
+        let mut seq = NOTIFY_SEQ.lock().unwrap();
+        let len_ms = unsafe { pv_notify(kind, volume, playback.unwrap_or(-1)) };
+        if len_ms < 0 {
+            return Err(format!("couldn't play the sound (code {len_ms})"));
+        }
+        *seq += 1;
+        let mine = *seq;
+        std::thread::spawn(move || {
+            // A little extra for the sound device's buffer to drain.
+            std::thread::sleep(Duration::from_millis(len_ms as u64 + 300));
+            let seq = NOTIFY_SEQ.lock().unwrap();
+            if *seq == mine {
+                unsafe { pv_notify_stop() };
+            }
+        });
+        Ok(())
     }
 
     /// Test hook: loop a WAV file into the call instead of the microphone.

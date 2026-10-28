@@ -42,6 +42,10 @@ tauri-plugin-log = "2"
 tauri-plugin-opener = "2"
 tauri-plugin-single-instance = "2"
 
+# Idle time and screen lock over D-Bus (idle.rs); already used by keyring.
+[target.'cfg(target_os = "linux")'.dependencies]
+dbus = "0.9"
+
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 

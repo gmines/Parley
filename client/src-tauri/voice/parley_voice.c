@@ -42,6 +42,10 @@ static int g_null_audio;
 static pj_pool_t *g_tone_pool;
 static pjmedia_port *g_tone_gen;
 static pjmedia_snd_port *g_tone_snd;
+/* Message sounds (pv_notify): likewise, separate from the ring tones. */
+static pj_pool_t *g_notify_pool;
+static pjmedia_port *g_notify_gen;
+static pjmedia_snd_port *g_notify_snd;
 /* Audio test (pv_audio_test): the mic feeds a null port so the bridge keeps
  * the device open and measures its level. */
 static int g_test_mode;
@@ -277,26 +281,35 @@ int pv_init(const pv_options *opt, pv_event_cb cb, void *ctx) {
     return 0;
 }
 
+static void player_stop(pj_pool_t **pool, pjmedia_port **gen, pjmedia_snd_port **snd) {
+    if (*snd) {
+        pjmedia_snd_port_disconnect(*snd);
+        pjmedia_snd_port_destroy(*snd);
+        *snd = NULL;
+    }
+    if (*gen) {
+        pjmedia_port_destroy(*gen);
+        *gen = NULL;
+    }
+    if (*pool) {
+        pj_pool_release(*pool);
+        *pool = NULL;
+    }
+}
+
 static void tone_stop(void) {
-    if (g_tone_snd) {
-        pjmedia_snd_port_disconnect(g_tone_snd);
-        pjmedia_snd_port_destroy(g_tone_snd);
-        g_tone_snd = NULL;
-    }
-    if (g_tone_gen) {
-        pjmedia_port_destroy(g_tone_gen);
-        g_tone_gen = NULL;
-    }
-    if (g_tone_pool) {
-        pj_pool_release(g_tone_pool);
-        g_tone_pool = NULL;
-    }
+    player_stop(&g_tone_pool, &g_tone_gen, &g_tone_snd);
+}
+
+static void notify_stop(void) {
+    player_stop(&g_notify_pool, &g_notify_gen, &g_notify_snd);
 }
 
 void pv_shutdown(void) {
     if (!g_started) return;
     ensure_thread();
     tone_stop();
+    notify_stop();
     audio_test_stop();
     pjsua_call_hangup_all();
     pjsua_destroy();
@@ -606,6 +619,17 @@ int pv_mic_level(void) {
 #define TONE_RATE 16000
 #define TONE_FRAME (TONE_RATE / 50)
 
+/* An output device index for pv_tone / pv_notify: -1 = the call's (or the
+ * selected) output, else the system default. */
+static int playback_dev(int playback) {
+    if (playback < 0) {
+        int cap;
+        if (pjsua_get_snd_dev(&cap, &playback) != PJ_SUCCESS || playback < PJMEDIA_AUD_DEFAULT_PLAYBACK_DEV)
+            playback = PJMEDIA_AUD_DEFAULT_PLAYBACK_DEV;
+    }
+    return playback;
+}
+
 int pv_tone(int kind, int playback) {
     if (!g_started) return -1;
     ensure_thread();
@@ -622,20 +646,18 @@ int pv_tone(int kind, int playback) {
     };
     const pjmedia_tone_desc *src = kind == PV_TONE_RINGBACK ? ringback : ring;
     unsigned count = kind == PV_TONE_RINGBACK ? PJ_ARRAY_SIZE(ringback) : PJ_ARRAY_SIZE(ring);
-    /* At the output volume (pv_set_levels). */
-    if (g_out_gain <= 0) return 0;
+    /* At the output volume (pv_set_levels), but never boosted: boost is for
+     * quiet voices, and the tones are loud enough at full volume. */
+    float gain = g_out_gain > 1 ? 1 : g_out_gain;
+    if (gain <= 0) return 0;
     pjmedia_tone_desc tones[PJ_ARRAY_SIZE(ring)];
     for (unsigned i = 0; i < count; i++) {
-        float v = (src[i].volume ? src[i].volume : PJMEDIA_TONEGEN_VOLUME) * g_out_gain;
+        float v = (src[i].volume ? src[i].volume : PJMEDIA_TONEGEN_VOLUME) * gain;
         tones[i] = src[i];
         tones[i].volume = (short)(v < 1 ? 1 : v > 32767 ? 32767 : v);
     }
 
-    if (playback < 0) {
-        int cap;
-        if (pjsua_get_snd_dev(&cap, &playback) != PJ_SUCCESS || playback < PJMEDIA_AUD_DEFAULT_PLAYBACK_DEV)
-            playback = PJMEDIA_AUD_DEFAULT_PLAYBACK_DEV;
-    }
+    playback = playback_dev(playback);
     g_tone_pool = pjsua_pool_create("tone", 1024, 1024);
     if (!g_tone_pool) return -3;
     if (pjmedia_tonegen_create(g_tone_pool, TONE_RATE, 1, TONE_FRAME, 16, 0, &g_tone_gen) != PJ_SUCCESS ||
@@ -646,6 +668,56 @@ int pv_tone(int kind, int playback) {
         return -4;
     }
     return 0;
+}
+
+/* Message sounds: like the ring tones, generated, but played once. Volume
+ * 0 in a step means the default (PJMEDIA_TONEGEN_VOLUME). */
+int pv_notify(int kind, float volume, int playback) {
+    if (!g_started) return -1;
+    ensure_thread();
+    notify_stop();
+    if (g_null_audio) return -2;
+
+    static const pjmedia_tone_desc chime[] = {{880, 0, 90, 20, 0, 0}, {1320, 0, 160, 0, 0, 0}};
+    static const pjmedia_tone_desc pop[] = {{1200, 0, 45, 0, 0, 0}};
+    static const pjmedia_tone_desc ding[] = {{1568, 0, 220, 0, 0, 0}};
+    static const pjmedia_tone_desc soft[] = {{523, 0, 120, 30, 7000, 0}, {659, 0, 180, 0, 7000, 0}};
+    const pjmedia_tone_desc *src;
+    unsigned count;
+    switch (kind) {
+    case PV_SOUND_CHIME: src = chime; count = PJ_ARRAY_SIZE(chime); break;
+    case PV_SOUND_POP:   src = pop;   count = PJ_ARRAY_SIZE(pop);   break;
+    case PV_SOUND_DING:  src = ding;  count = PJ_ARRAY_SIZE(ding);  break;
+    case PV_SOUND_SOFT:  src = soft;  count = PJ_ARRAY_SIZE(soft);  break;
+    default: return -3;
+    }
+    if (volume <= 0) return 0;
+    if (volume > 1) volume = 1;
+    pjmedia_tone_desc tones[2];
+    int len_ms = 0;
+    for (unsigned i = 0; i < count; i++) {
+        float v = (src[i].volume ? src[i].volume : PJMEDIA_TONEGEN_VOLUME) * volume;
+        tones[i] = src[i];
+        tones[i].volume = (short)(v < 1 ? 1 : v);
+        len_ms += src[i].on_msec + src[i].off_msec;
+    }
+
+    g_notify_pool = pjsua_pool_create("notify", 1024, 1024);
+    if (!g_notify_pool) return -4;
+    if (pjmedia_tonegen_create(g_notify_pool, TONE_RATE, 1, TONE_FRAME, 16, 0, &g_notify_gen) != PJ_SUCCESS ||
+        pjmedia_tonegen_play(g_notify_gen, count, tones, 0) != PJ_SUCCESS ||
+        pjmedia_snd_port_create_player(g_notify_pool, playback_dev(playback), TONE_RATE, 1, TONE_FRAME, 16, 0, &g_notify_snd) != PJ_SUCCESS ||
+        pjmedia_snd_port_connect(g_notify_snd, g_notify_gen) != PJ_SUCCESS) {
+        notify_stop();
+        return -4;
+    }
+    return len_ms;
+}
+
+void pv_notify_stop(void) {
+    if (!g_started) return;
+    ensure_thread();
+    notify_stop();
 }
 
 int pv_test_play(const char *wav_path) {

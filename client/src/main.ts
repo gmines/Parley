@@ -4,7 +4,8 @@ import { conversationTitle, dmPeer, store } from "./store";
 import { callBar, disposeWidget, voice } from "./voice";
 import { aboutView, versionLabel } from "./views/about";
 import { accountView } from "./views/account";
-import { audioPanel } from "./views/audio";
+import { audioPanel, callSettingsPanel, messageSoundsPanel } from "./views/audio";
+import { playMessageSound } from "./audio";
 import { authView } from "./views/auth";
 import { conversationView, type ConversationView } from "./views/conversation";
 import { friendsView, type FriendsView } from "./views/friends";
@@ -226,7 +227,13 @@ function showApp(initialUser: User) {
           "div",
           { class: "main" },
           h("header", { class: "main-header" }, h("h1", { text: "Audio" })),
-          h("section", { class: "content settings" }, h("section", { class: "settings-section" }, h("h2", { text: "Microphone and speakers" }), audio.el)),
+          h(
+            "section",
+            { class: "content settings" },
+            h("section", { class: "settings-section" }, h("h2", { text: "Microphone and speakers" }), audio.el),
+            h("section", { class: "settings-section" }, h("h2", { text: "Message sounds" }), messageSoundsPanel()),
+            h("section", { class: "settings-section" }, h("h2", { text: "Calls" }), callSettingsPanel()),
+          ),
         ),
       );
     } else if (page.kind === "about") {
@@ -284,7 +291,9 @@ function showApp(initialUser: User) {
       case "message.created": {
         const open = conversation?.id === e.data.conversation_id;
         if (open) conversation!.addMessage(e.data);
-        store.addMessage(e.data, open && document.hasFocus());
+        const seen = open && document.hasFocus();
+        store.addMessage(e.data, seen);
+        if (!seen && e.data.author?.id !== user.id) playMessageSound();
         break;
       }
       case "conversation.created":
