@@ -521,4 +521,8 @@ input:focus { outline: none; border-color: var(--accent); }
 .range { flex: 1; min-width: 0; accent-color: var(--accent); }
 .range-value { width: 4ch; text-align: right; font-variant-numeric: tabular-nums; }
 .select-sm { width: auto; padding: 4px 8px; }
+/* A custom sound's file name (and Change / Remove), under its sound choice. */
+.custom-sound { display: flex; align-items: center; gap: 8px; padding-left: 74px; font-size: 13px; color: var(--text-2); min-width: 0; }
+.custom-sound[hidden] { display: none; }
+.custom-sound-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
 .form-actions-start { justify-content: flex-start; }

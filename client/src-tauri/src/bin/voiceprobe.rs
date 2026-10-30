@@ -9,14 +9,15 @@
 //!              --play in.wav --record out.wav --seconds 10
 //!   voiceprobe --selftest        (echo canceller the app uses, and SIP over TLS)
 //!   voiceprobe --list-devices
-//!   voiceprobe --tone ring|ringback --seconds 5   (plays a ring tone on the default output)
+//!   voiceprobe --tone ring|ringback|<sound>|<file.wav> --seconds 5
+//!              (plays a ring tone on the default output; <sound> as in ToneSound, e.g. ringback_uk)
 //!   voiceprobe --audio-test meter|loopback --seconds 5 [--capture N --playback N] [--mic-gain X]
 //!              (the settings page's microphone test: prints the level)
 
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
-use parley_client_lib::voice_engine::{AudioTest, CallState, Engine, EngineEvent, SipCredentials, Tone};
+use parley_client_lib::voice_engine::{AudioTest, CallState, Engine, EngineEvent, SipCredentials, Tone, ToneSound};
 
 fn arg(name: &str) -> Option<String> {
     let mut args = std::env::args();
@@ -55,17 +56,21 @@ fn main() {
     }
     // Play a ring tone on the real default output for a while.
     if let Some(kind) = arg("--tone") {
-        let tone = match kind.as_str() {
-            "ring" => Tone::Ring,
-            "ringback" => Tone::Ringback,
-            other => panic!("unknown tone {other}"),
-        };
         let secs: u64 = arg("--seconds").and_then(|s| s.parse().ok()).unwrap_or(5);
         let engine = Engine::start(false, 1, |_| {}).expect("start engine");
-        let result = engine.tone(Some(tone), None);
+        let result = if kind.ends_with(".wav") {
+            engine.tone_file(std::path::Path::new(&kind), 1.0, None)
+        } else {
+            let sound = match kind.as_str() {
+                "ring" => Tone::Ring.default_sound(),
+                "ringback" => Tone::Ringback.default_sound(),
+                other => serde_json::from_value::<ToneSound>(serde_json::json!(other)).unwrap_or_else(|_| panic!("unknown tone {other}")),
+            };
+            engine.tone(Some(sound), 1.0, None)
+        };
         if result.is_ok() {
             std::thread::sleep(Duration::from_secs(secs));
-            engine.tone(None, None).expect("stop tone");
+            engine.tone(None, 0.0, None).expect("stop tone");
         }
         engine.shutdown();
         match result {

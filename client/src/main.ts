@@ -4,7 +4,7 @@ import { conversationTitle, dmPeer, store } from "./store";
 import { callBar, disposeWidget, voice } from "./voice";
 import { aboutView, versionLabel } from "./views/about";
 import { accountView } from "./views/account";
-import { audioPanel, callSettingsPanel, messageSoundsPanel } from "./views/audio";
+import { audioPanel, callSettingsPanel, callSoundsPanel, messageSoundsPanel } from "./views/audio";
 import { playMessageSound } from "./audio";
 import { authView } from "./views/auth";
 import { conversationView, type ConversationView } from "./views/conversation";
@@ -232,6 +232,7 @@ function showApp(initialUser: User) {
             { class: "content settings" },
             h("section", { class: "settings-section" }, h("h2", { text: "Microphone and speakers" }), audio.el),
             h("section", { class: "settings-section" }, h("h2", { text: "Message sounds" }), messageSoundsPanel()),
+            h("section", { class: "settings-section" }, h("h2", { text: "Call sounds" }), callSoundsPanel()),
             h("section", { class: "settings-section" }, h("h2", { text: "Calls" }), callSettingsPanel()),
           ),
         ),

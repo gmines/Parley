@@ -6,6 +6,7 @@ mod idle;
 mod realtime;
 mod secrets;
 mod session;
+mod sounds;
 mod voice;
 pub mod voice_engine;
 mod window;
@@ -90,6 +91,8 @@ pub fn run() {
             voice::voice_tone,
             voice::voice_notify,
             idle::system_idle,
+            sounds::sound_import,
+            sounds::sound_remove,
             window::request_attention,
             voice::voice_audio_test,
             voice::voice_mic_level,

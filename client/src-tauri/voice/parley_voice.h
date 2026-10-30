@@ -63,15 +63,28 @@ int pv_init(const pv_options *opt, pv_event_cb cb, void *ctx);
 /* Stops everything (hangs up). */
 void pv_shutdown(void);
 
-/* Ring tones (pv_tone). */
+/* Ring tones (pv_tone). Any of them can be used for either purpose; the
+ * app offers the ringback ones while calling and the others for incoming
+ * calls. */
 enum pv_tone_kind {
     PV_TONE_NONE = 0,
-    PV_TONE_RINGBACK = 1, /* we're calling: waiting for someone to answer */
-    PV_TONE_RING = 2,     /* incoming call */
+    PV_TONE_RINGBACK = 1, /* we're calling: North American ringback */
+    PV_TONE_RING = 2,     /* incoming call: rising chirps */
+    PV_TONE_CLASSIC = 3,  /* incoming: British-style double ring */
+    PV_TONE_TRILL = 4,    /* incoming: fast warble */
+    PV_TONE_MARIMBA = 5,  /* incoming: three rising notes */
+    PV_TONE_PULSE = 6,    /* incoming: three short beeps */
+    PV_TONE_RINGBACK_EU = 7,   /* calling: European, 425 Hz */
+    PV_TONE_RINGBACK_UK = 8,   /* calling: British double ring */
+    PV_TONE_RINGBACK_SOFT = 9, /* calling: a quiet low note */
 };
-/* Starts a looping tone on `playback` (device index, -1 = the call's or the
- * default output), replacing any other; PV_TONE_NONE stops it. 0 = ok. */
-int pv_tone(int kind, int playback);
+/* Starts a looping tone at `volume` 0-1 (independent of pv_set_levels) on
+ * `playback` (device index, -1 = the call's or the default output),
+ * replacing any other; PV_TONE_NONE stops it. 0 = ok. */
+int pv_tone(int kind, float volume, int playback);
+/* Like pv_tone, looping a WAV file (16-bit PCM) instead. 0 = ok, -5 = the
+ * file couldn't be opened. */
+int pv_tone_file(const char *wav_path, float volume, int playback);
 
 /* Message notification sounds (pv_notify): short, played once. */
 enum pv_sound_kind {
@@ -85,6 +98,9 @@ enum pv_sound_kind {
  * sound still playing. Returns its length in ms, or < 0 on error; call
  * pv_notify_stop after that long to close the stream. */
 int pv_notify(int kind, float volume, int playback);
+/* Like pv_notify, playing a WAV file (16-bit PCM) once. -5 = the file
+ * couldn't be opened. */
+int pv_notify_file(const char *wav_path, float volume, int playback);
 void pv_notify_stop(void);
 
 /* 1 if SIP over TLS is available (needs pv_init): tell the server so. */

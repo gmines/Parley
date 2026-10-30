@@ -1,12 +1,14 @@
 // Audio device choices, saved by name (device indexes can change between
 // runs), and volume levels: applied to the voice engine before a call or an
 // audio test.
-import { api, type AudioDevice, type MessageSound } from "./api";
+import { api, type AudioDevice, type MessageSound, type RingbackSound, type RingSound, type SoundSlot } from "./api";
 
 const DEVICE_KEY = "parley.audioDevices";
 const LEVELS_KEY = "parley.audioLevels";
 const SOUNDS_KEY = "parley.messageSounds";
 const AUTO_LEAVE_KEY = "parley.autoLeave";
+const CALL_SOUNDS_KEY = "parley.callSounds";
+const CUSTOM_NAMES_KEY = "parley.customSounds";
 
 export interface DeviceChoice {
   capture: string | null;
@@ -74,7 +76,7 @@ export function applyLevels(levels = savedLevels()): Promise<void> {
 
 export interface MessageSounds {
   enabled: boolean;
-  sound: MessageSound;
+  sound: MessageSound | "custom";
   /** 0-100, independent of the call volume. */
   volume: number;
 }
@@ -93,7 +95,7 @@ export function savedMessageSounds(): MessageSounds {
     return v
       ? {
           enabled: typeof v.enabled === "boolean" ? v.enabled : def.enabled,
-          sound: MESSAGE_SOUNDS.some((s) => s.id === v.sound) ? v.sound : def.sound,
+          sound: v.sound === "custom" || MESSAGE_SOUNDS.some((s) => s.id === v.sound) ? v.sound : def.sound,
           volume: num(v.volume, 0, 100, def.volume),
         }
       : def;
@@ -123,6 +125,79 @@ export async function playMessageSound(preview?: MessageSounds) {
   }
   const playback = await savedPlaybackIndex();
   await api.voiceNotify(s.sound, s.volume / 100, playback).catch(() => {});
+}
+
+// Call sounds (#13) ----------------------------------------------------------------
+
+export interface CallSounds {
+  /** Incoming calls. */
+  ring: { enabled: boolean; sound: RingSound | "custom" };
+  /** What we hear while calling, until someone answers. */
+  ringback: { enabled: boolean; sound: RingbackSound | "custom" };
+  /** 0-100, for both; independent of the call volume. */
+  volume: number;
+}
+
+export const RING_SOUNDS: { id: RingSound; label: string }[] = [
+  { id: "chirp", label: "Chirp" },
+  { id: "classic", label: "Classic" },
+  { id: "trill", label: "Trill" },
+  { id: "marimba", label: "Marimba" },
+  { id: "pulse", label: "Pulse" },
+];
+
+export const RINGBACK_SOUNDS: { id: RingbackSound; label: string }[] = [
+  { id: "ringback", label: "North American" },
+  { id: "ringback_eu", label: "European" },
+  { id: "ringback_uk", label: "British" },
+  { id: "ringback_soft", label: "Soft" },
+];
+
+export function defaultCallSounds(): CallSounds {
+  return { ring: { enabled: true, sound: "chirp" }, ringback: { enabled: true, sound: "ringback" }, volume: 80 };
+}
+
+export function savedCallSounds(): CallSounds {
+  const def = defaultCallSounds();
+  try {
+    const v = JSON.parse(localStorage.getItem(CALL_SOUNDS_KEY) || "null");
+    if (!v) return def;
+    const pick = <T extends string>(x: { enabled?: unknown; sound?: unknown } | undefined, ids: { id: T }[], d: { enabled: boolean; sound: T | "custom" }) => ({
+      enabled: typeof x?.enabled === "boolean" ? x.enabled : d.enabled,
+      sound: x?.sound === "custom" || ids.some((s) => s.id === x?.sound) ? (x!.sound as T | "custom") : d.sound,
+    });
+    return { ring: pick(v.ring, RING_SOUNDS, def.ring), ringback: pick(v.ringback, RINGBACK_SOUNDS, def.ringback), volume: num(v.volume, 0, 100, def.volume) };
+  } catch {
+    return def;
+  }
+}
+
+export function saveCallSounds(s: CallSounds) {
+  try {
+    localStorage.setItem(CALL_SOUNDS_KEY, JSON.stringify(s));
+  } catch {
+    // storage unavailable: applies to this session only
+  }
+}
+
+/** The names of the files imported as custom sounds, for display. */
+export function customSoundNames(): Partial<Record<SoundSlot, string>> {
+  try {
+    return JSON.parse(localStorage.getItem(CUSTOM_NAMES_KEY) || "null") ?? {};
+  } catch {
+    return {};
+  }
+}
+
+export function saveCustomSoundName(slot: SoundSlot, name: string | null) {
+  const names = customSoundNames();
+  if (name) names[slot] = name;
+  else delete names[slot];
+  try {
+    localStorage.setItem(CUSTOM_NAMES_KEY, JSON.stringify(names));
+  } catch {
+    // storage unavailable: the file still plays, its name isn't shown
+  }
 }
 
 // Leaving abandoned calls (#15) ----------------------------------------------------

@@ -1,13 +1,20 @@
-import { api, errorMessage, type AudioDevice } from "../api";
+import { api, errorMessage, type AudioDevice, type SoundSlot } from "../api";
 import {
   applyLevels,
   applySavedDevices,
   AUTO_LEAVE_STEPS,
   BOOST_STEPS,
+  customSoundNames,
+  defaultCallSounds,
   friendlyName,
   MESSAGE_SOUNDS,
   playMessageSound,
+  RING_SOUNDS,
+  RINGBACK_SOUNDS,
   saveAutoLeave,
+  saveCallSounds,
+  saveCustomSoundName,
+  savedCallSounds,
   savedAutoLeave,
   savedDevices,
   saveDevices,
@@ -230,35 +237,144 @@ export function audioPanel(): { el: HTMLElement; dispose: () => void } {
   };
 }
 
-/** Message sounds (#14): on/off, which sound, its volume, and a preview. */
+/**
+ * A sound choice: the built-in sounds and "Custom file…", which asks for a
+ * file (WAV, MP3, OGG or FLAC) the first time; with a custom sound chosen,
+ * the file's name and Change / Remove below. onChange runs once a choice is
+ * made (and a file imported).
+ */
+function soundPicker<T extends string>(opts: {
+  id: string;
+  slot: SoundSlot;
+  builtins: { id: T; label: string }[];
+  value: T | "custom";
+  /** Chosen when the custom file is removed. */
+  fallback: T;
+  onChange: (value: T | "custom") => void;
+}) {
+  const select = h("select", { class: "select select-sm", attrs: { id: opts.id } }) as HTMLSelectElement;
+  for (const b of opts.builtins) select.append(h("option", { text: b.label, attrs: { value: b.id } }));
+  select.append(h("option", { text: "Custom file…", attrs: { value: "custom" } }));
+  select.value = opts.value;
+  const file = h("input", { attrs: { type: "file", accept: ".wav,.mp3,.ogg,.oga,.flac,audio/*" } }) as HTMLInputElement;
+  file.hidden = true;
+  const name = h("span", { class: "custom-sound-name" });
+  const change = h("button", { class: "btn btn-sm btn-ghost", attrs: { type: "button" } });
+  const remove = h("button", { class: "btn btn-sm btn-ghost", attrs: { type: "button" }, text: "Remove" });
+  const row = h("div", { class: "custom-sound" }, name, change, remove, file);
+  const status = h("p", { class: "hint", attrs: { role: "status" } });
+  status.hidden = true;
+  let current = opts.value;
+  let busy = false;
+  let enabled = true;
+
+  const render = () => {
+    const n = customSoundNames()[opts.slot];
+    row.hidden = select.value !== "custom";
+    name.textContent = n ?? "No file chosen: the default plays.";
+    name.title = n ?? "";
+    change.textContent = n ? "Change file…" : "Choose file…";
+    remove.hidden = !n;
+    for (const el of [select, change, remove]) el.disabled = busy || !enabled;
+  };
+  const choose = (value: T | "custom") => {
+    current = value;
+    select.value = value;
+    render();
+    opts.onChange(value);
+  };
+  const showStatus = (text: string, warn = false) => {
+    status.textContent = text;
+    status.hidden = !text; // no empty gap in the panel
+    status.classList.toggle("hint-warn", warn);
+  };
+
+  select.addEventListener("change", () => {
+    showStatus("");
+    if (select.value === "custom" && !customSoundNames()[opts.slot]) {
+      // Stays on the current sound until a file is imported (or the picker is cancelled).
+      select.value = current;
+      file.click();
+      return;
+    }
+    choose(select.value as T | "custom");
+  });
+  change.addEventListener("click", () => file.click());
+  file.addEventListener("change", async () => {
+    const f = file.files?.[0];
+    file.value = "";
+    if (!f) return;
+    busy = true;
+    showStatus(`Importing ${f.name}…`);
+    render();
+    try {
+      const r = await api.soundImport(opts.slot, f);
+      saveCustomSoundName(opts.slot, f.name);
+      showStatus(r.trimmed ? `It's longer than that: Parley plays the first ${Math.round(r.ms / 1000)} seconds.` : "");
+      busy = false;
+      choose("custom");
+    } catch (e) {
+      busy = false;
+      showStatus(errorMessage(e), true);
+      render();
+    }
+  });
+  remove.addEventListener("click", async () => {
+    try {
+      await api.soundRemove(opts.slot);
+      saveCustomSoundName(opts.slot, null);
+      showStatus("");
+      choose(opts.fallback);
+    } catch (e) {
+      showStatus(errorMessage(e), true);
+    }
+  });
+  render();
+
+  return {
+    select,
+    /** The custom file's row and the import status, to place under the select. */
+    extra: [row, status],
+    setEnabled(on: boolean) {
+      enabled = on;
+      render();
+    },
+  };
+}
+
+/** Message sounds (#14): on/off, which sound (or a custom file), its volume, and a preview. */
 export function messageSoundsPanel(): HTMLElement {
   const s = savedMessageSounds();
   const enabled = h("input", { attrs: { type: "checkbox", id: "f-msg-sound-on" } }) as HTMLInputElement;
   enabled.checked = s.enabled;
-  const sound = h("select", { class: "select select-sm", attrs: { id: "f-msg-sound" } }) as HTMLSelectElement;
-  for (const m of MESSAGE_SOUNDS) {
-    const o = h("option", { text: m.label, attrs: { value: m.id } });
-    if (m.id === s.sound) o.selected = true;
-    sound.append(o);
-  }
+  let sound = s.sound;
+  const picker = soundPicker({
+    id: "f-msg-sound",
+    slot: "message",
+    builtins: MESSAGE_SOUNDS,
+    value: s.sound,
+    fallback: "chime",
+    onChange: (v) => {
+      sound = v;
+      changed();
+      playMessageSound(current());
+    },
+  });
   const volume = h("input", { class: "range", attrs: { type: "range", id: "f-msg-vol", min: "0", max: "100", step: "1", value: String(s.volume) } }) as HTMLInputElement;
   const volumeLabel = h("span", { class: "range-value" });
   const preview = h("button", { class: "btn btn-sm btn-ghost", attrs: { type: "button" }, text: "Play" });
 
-  const current = () => ({ enabled: enabled.checked, sound: sound.value as (typeof MESSAGE_SOUNDS)[number]["id"], volume: Number(volume.value) });
+  const current = () => ({ enabled: enabled.checked, sound, volume: Number(volume.value) });
   const render = () => {
     volumeLabel.textContent = `${volume.value}%`;
-    for (const el of [sound, volume, preview]) el.disabled = !enabled.checked;
+    for (const el of [volume, preview]) el.disabled = !enabled.checked;
+    picker.setEnabled(enabled.checked);
   };
-  const changed = () => {
+  function changed() {
     saveMessageSounds(current());
     render();
-  };
+  }
   enabled.addEventListener("change", changed);
-  sound.addEventListener("change", () => {
-    changed();
-    playMessageSound(current());
-  });
   volume.addEventListener("input", changed);
   volume.addEventListener("change", () => playMessageSound(current()));
   preview.addEventListener("click", () => playMessageSound(current()));
@@ -268,10 +384,95 @@ export function messageSoundsPanel(): HTMLElement {
     "div",
     { class: "audio-panel" },
     h("label", { class: "check", attrs: { for: "f-msg-sound-on" } }, enabled, h("span", { text: "Play a sound for new messages" })),
-    h("div", { class: "range-row" }, h("label", { attrs: { for: "f-msg-sound" }, text: "Sound" }), sound, preview),
+    h("div", { class: "range-row" }, h("label", { attrs: { for: "f-msg-sound" }, text: "Sound" }), picker.select, preview),
+    ...picker.extra,
     h("div", { class: "range-row" }, h("label", { attrs: { for: "f-msg-vol" }, text: "Volume" }), volume, volumeLabel),
-    h("p", { class: "hint", text: "Plays on your speakers / headphones above, unless you're reading that conversation." }),
+    h("p", {
+      class: "hint",
+      text: "Plays on your speakers / headphones above, unless you're reading that conversation. A custom sound can be a WAV, MP3, OGG or FLAC file; Parley plays up to its first 5 seconds.",
+    }),
   );
+}
+
+/** Ring tones (#13): for incoming calls and while calling, each with on/off,
+ * a built-in sound or a custom file, and a preview; one volume for both. */
+export function callSoundsPanel(): HTMLElement {
+  const s = savedCallSounds();
+  const play = (tone: "ring" | "ringback") => voice.previewTone({ tone, sound: s[tone].sound, volume: s.volume / 100 });
+  const groups: { on: HTMLInputElement; picker: ReturnType<typeof soundPicker>; preview: HTMLButtonElement }[] = [];
+
+  const group = <T extends string>(tone: "ring" | "ringback", title: string, builtins: { id: T; label: string }[], fallback: T) => {
+    const setting = s[tone] as { enabled: boolean; sound: T | "custom" };
+    const on = h("input", { attrs: { type: "checkbox", id: `f-${tone}-on` } }) as HTMLInputElement;
+    on.checked = setting.enabled;
+    const picker = soundPicker({
+      id: `f-${tone}-sound`,
+      slot: tone,
+      builtins,
+      value: setting.sound,
+      fallback,
+      onChange: (v) => {
+        setting.sound = v;
+        saveCallSounds(s);
+        play(tone);
+      },
+    });
+    const preview = h("button", { class: "btn btn-sm btn-ghost", attrs: { type: "button" }, text: "Play" }) as HTMLButtonElement;
+    preview.addEventListener("click", () => play(tone));
+    on.addEventListener("change", () => {
+      setting.enabled = on.checked;
+      saveCallSounds(s);
+      render();
+    });
+    groups.push({ on, picker, preview });
+    return [
+      h("label", { class: "check", attrs: { for: `f-${tone}-on` } }, on, h("span", { text: title })),
+      h("div", { class: "range-row" }, h("label", { attrs: { for: `f-${tone}-sound` }, text: "Sound" }), picker.select, preview),
+      ...picker.extra,
+    ];
+  };
+
+  const volume = h("input", { class: "range", attrs: { type: "range", id: "f-ring-vol", min: "0", max: "100", step: "1", value: String(s.volume) } }) as HTMLInputElement;
+  const volumeLabel = h("span", { class: "range-value" });
+  volume.addEventListener("input", () => {
+    s.volume = Number(volume.value);
+    saveCallSounds(s);
+    render();
+  });
+  volume.addEventListener("change", () => play("ring"));
+
+  const restore = h("button", { class: "btn btn-sm btn-ghost", attrs: { type: "button" }, text: "Restore defaults" });
+  restore.addEventListener("click", async () => {
+    saveCallSounds(defaultCallSounds());
+    for (const slot of ["ring", "ringback"] as const) {
+      await api.soundRemove(slot).catch(() => {});
+      saveCustomSoundName(slot, null);
+    }
+    el.replaceWith(callSoundsPanel());
+  });
+
+  function render() {
+    volumeLabel.textContent = `${volume.value}%`;
+    for (const g of groups) {
+      g.picker.setEnabled(g.on.checked);
+      g.preview.disabled = !g.on.checked;
+    }
+  }
+
+  const el = h(
+    "div",
+    { class: "audio-panel" },
+    ...group("ring", "Ring for incoming calls", RING_SOUNDS, "chirp"),
+    ...group("ringback", "Ring while I'm calling someone", RINGBACK_SOUNDS, "ringback"),
+    h("div", { class: "range-row" }, h("label", { attrs: { for: "f-ring-vol" }, text: "Volume" }), volume, volumeLabel),
+    h("div", { class: "audio-actions" }, restore),
+    h("p", {
+      class: "hint",
+      text: "Plays on your speakers / headphones above. A custom sound can be a WAV, MP3, OGG or FLAC file; Parley loops up to its first 30 seconds.",
+    }),
+  );
+  render();
+  return el;
 }
 
 /** Leaving calls you've walked away from (#15). */

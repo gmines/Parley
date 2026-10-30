@@ -6,6 +6,7 @@
 //! [`Engine::start`]. It handles one call at a time.
 
 use std::ffi::{c_char, c_int, c_void, CStr, CString};
+use std::path::Path;
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
@@ -56,7 +57,8 @@ extern "C" {
     fn pv_init(opt: *const PvOptions, cb: EventCb, ctx: *mut c_void) -> c_int;
     fn pv_shutdown();
     fn pv_has_tls() -> c_int;
-    fn pv_tone(kind: c_int, playback: c_int) -> c_int;
+    fn pv_tone(kind: c_int, volume: f32, playback: c_int) -> c_int;
+    fn pv_tone_file(path: *const c_char, volume: f32, playback: c_int) -> c_int;
     fn pv_join(p: *const PvJoinParams) -> c_int;
     fn pv_leave();
     fn pv_set_mute(muted: c_int);
@@ -75,6 +77,7 @@ extern "C" {
     fn pv_listen_only() -> c_int;
     fn pv_set_levels(mic: f32, out: f32);
     fn pv_notify(kind: c_int, volume: f32, playback: c_int) -> c_int;
+    fn pv_notify_file(path: *const c_char, volume: f32, playback: c_int) -> c_int;
     fn pv_notify_stop();
 }
 
@@ -101,6 +104,34 @@ pub enum Tone {
     Ringback,
     /// Incoming call.
     Ring,
+}
+
+/// The built-in ring tone patterns (#13): any can be played for either
+/// [`Tone`]; the app offers the `Ringback*` ones while calling.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToneSound {
+    /// The default ring: two rising chirps.
+    Chirp,
+    Classic,
+    Trill,
+    Marimba,
+    Pulse,
+    /// The default ringback (North American).
+    Ringback,
+    RingbackEu,
+    RingbackUk,
+    RingbackSoft,
+}
+
+impl Tone {
+    /// The built-in sound to fall back on.
+    pub fn default_sound(self) -> ToneSound {
+        match self {
+            Tone::Ring => ToneSound::Chirp,
+            Tone::Ringback => ToneSound::Ringback,
+        }
+    }
 }
 
 /// Credentials from voice-control's join endpoint.
@@ -322,18 +353,28 @@ impl Engine {
     }
 
     /// Plays a looping ring tone on its own output stream (`None` stops it),
-    /// on `playback` (device index) or the call's / default output.
-    pub fn tone(&self, tone: Option<Tone>, playback: Option<i32>) -> Result<(), String> {
-        let kind = match tone {
+    /// at `volume` (0-1), on `playback` (device index) or the call's /
+    /// default output.
+    pub fn tone(&self, sound: Option<ToneSound>, volume: f32, playback: Option<i32>) -> Result<(), String> {
+        let kind = match sound {
             None => 0,
-            Some(Tone::Ringback) => 1,
-            Some(Tone::Ring) => 2,
+            Some(ToneSound::Ringback) => 1,
+            Some(ToneSound::Chirp) => 2,
+            Some(ToneSound::Classic) => 3,
+            Some(ToneSound::Trill) => 4,
+            Some(ToneSound::Marimba) => 5,
+            Some(ToneSound::Pulse) => 6,
+            Some(ToneSound::RingbackEu) => 7,
+            Some(ToneSound::RingbackUk) => 8,
+            Some(ToneSound::RingbackSoft) => 9,
         };
-        match unsafe { pv_tone(kind, playback.unwrap_or(-1)) } {
-            0 => Ok(()),
-            -2 => Err("no sound device".into()),
-            rc => Err(format!("couldn't play the ring tone (code {rc})")),
-        }
+        tone_result(unsafe { pv_tone(kind, volume, playback.unwrap_or(-1)) })
+    }
+
+    /// Like [`Engine::tone`], looping a 16-bit WAV file.
+    pub fn tone_file(&self, path: &Path, volume: f32, playback: Option<i32>) -> Result<(), String> {
+        let p = c_path(path)?;
+        tone_result(unsafe { pv_tone_file(p.as_ptr(), volume, playback.unwrap_or(-1)) })
     }
 
     /// Plays a message sound once, at `volume` (0-1), on `playback` (device
@@ -345,22 +386,13 @@ impl Engine {
             Sound::Ding => 3,
             Sound::Soft => 4,
         };
-        let mut seq = NOTIFY_SEQ.lock().unwrap();
-        let len_ms = unsafe { pv_notify(kind, volume, playback.unwrap_or(-1)) };
-        if len_ms < 0 {
-            return Err(format!("couldn't play the sound (code {len_ms})"));
-        }
-        *seq += 1;
-        let mine = *seq;
-        std::thread::spawn(move || {
-            // A little extra for the sound device's buffer to drain.
-            std::thread::sleep(Duration::from_millis(len_ms as u64 + 300));
-            let seq = NOTIFY_SEQ.lock().unwrap();
-            if *seq == mine {
-                unsafe { pv_notify_stop() };
-            }
-        });
-        Ok(())
+        notify_with(|| unsafe { pv_notify(kind, volume, playback.unwrap_or(-1)) })
+    }
+
+    /// Like [`Engine::notify`], playing a 16-bit WAV file once.
+    pub fn notify_file(&self, path: &Path, volume: f32, playback: Option<i32>) -> Result<(), String> {
+        let p = c_path(path)?;
+        notify_with(|| unsafe { pv_notify_file(p.as_ptr(), volume, playback.unwrap_or(-1)) })
     }
 
     /// Test hook: loop a WAV file into the call instead of the microphone.
@@ -398,6 +430,40 @@ impl Engine {
 pub enum AudioTest {
     Meter,
     Loopback,
+}
+
+fn tone_result(rc: c_int) -> Result<(), String> {
+    match rc {
+        0 => Ok(()),
+        -2 => Err("no sound device".into()),
+        -5 => Err("couldn't open the sound file".into()),
+        rc => Err(format!("couldn't play the ring tone (code {rc})")),
+    }
+}
+
+fn c_path(path: &Path) -> Result<CString, String> {
+    CString::new(path.to_string_lossy().as_bytes()).map_err(|e| e.to_string())
+}
+
+/// Starts a message sound with `play` (pv_notify*, which returns its length
+/// in ms) and closes its stream once it has played.
+fn notify_with(play: impl FnOnce() -> c_int) -> Result<(), String> {
+    let mut seq = NOTIFY_SEQ.lock().unwrap();
+    let len_ms = play();
+    if len_ms < 0 {
+        return Err(if len_ms == -5 { "couldn't open the sound file".into() } else { format!("couldn't play the sound (code {len_ms})") });
+    }
+    *seq += 1;
+    let mine = *seq;
+    std::thread::spawn(move || {
+        // A little extra for the sound device's buffer to drain.
+        std::thread::sleep(Duration::from_millis(len_ms as u64 + 300));
+        let seq = NOTIFY_SEQ.lock().unwrap();
+        if *seq == mine {
+            unsafe { pv_notify_stop() };
+        }
+    });
+    Ok(())
 }
 
 /// Why the engine's last join or audio test failed.

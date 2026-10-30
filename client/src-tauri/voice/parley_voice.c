@@ -613,9 +613,9 @@ int pv_mic_level(void) {
     return (int)rx;
 }
 
-/* Ring tones, generated (no audio files) and played on an output-only stream
- * of their own: ringing doesn't open the microphone, and it doesn't touch
- * the call's audio. */
+/* Ring tones, generated (or the user's own WAV file, pv_tone_file) and
+ * played on an output-only stream of their own: ringing doesn't open the
+ * microphone, and it doesn't touch the call's audio. */
 #define TONE_RATE 16000
 #define TONE_FRAME (TONE_RATE / 50)
 
@@ -630,44 +630,148 @@ static int playback_dev(int playback) {
     return playback;
 }
 
-int pv_tone(int kind, int playback) {
+/* Volume as a tonegen level (0 in a step means PJMEDIA_TONEGEN_VOLUME). */
+static short tone_volume(short level, float volume) {
+    float v = (level ? level : PJMEDIA_TONEGEN_VOLUME) * volume;
+    return (short)(v < 1 ? 1 : v > 32767 ? 32767 : v);
+}
+
+/* Starts `gen` on its own output-only stream (*snd), or cleans up with
+ * `stop` and returns -4. */
+static int play_port(pj_pool_t *pool, pjmedia_port *gen, int playback, pjmedia_snd_port **snd, void (*stop)(void)) {
+    const pjmedia_audio_format_detail *f = pjmedia_format_get_audio_format_detail(&gen->info.fmt, PJ_TRUE);
+    if (pjmedia_snd_port_create_player(pool, playback_dev(playback), f->clock_rate, f->channel_count,
+                                       PJMEDIA_PIA_SPF(&gen->info), f->bits_per_sample, 0, snd) != PJ_SUCCESS ||
+        pjmedia_snd_port_connect(*snd, gen) != PJ_SUCCESS) {
+        stop();
+        return -4;
+    }
+    return 0;
+}
+
+int pv_tone(int kind, float volume, int playback) {
     if (!g_started) return -1;
     ensure_thread();
     tone_stop();
     if (kind == PV_TONE_NONE) return 0;
     if (g_null_audio) return -2;
 
-    /* Ringback (caller): the North American 440+480 Hz, 2 s on, 4 s off.
-     * Incoming: two short rising chirps, twice, every 3 s. */
+    /* Each loops: the last step's off time is the pause between rings. */
     static const pjmedia_tone_desc ringback[] = {{440, 480, 2000, 4000, 7000, 0}};
     static const pjmedia_tone_desc ring[] = {
         {660, 0, 220, 30, 0, 0}, {880, 0, 220, 400, 0, 0},
         {660, 0, 220, 30, 0, 0}, {880, 0, 220, 1880, 0, 0},
     };
-    const pjmedia_tone_desc *src = kind == PV_TONE_RINGBACK ? ringback : ring;
-    unsigned count = kind == PV_TONE_RINGBACK ? PJ_ARRAY_SIZE(ringback) : PJ_ARRAY_SIZE(ring);
-    /* At the output volume (pv_set_levels), but never boosted: boost is for
-     * quiet voices, and the tones are loud enough at full volume. */
-    float gain = g_out_gain > 1 ? 1 : g_out_gain;
-    if (gain <= 0) return 0;
-    pjmedia_tone_desc tones[PJ_ARRAY_SIZE(ring)];
+    static const pjmedia_tone_desc classic[] = {{400, 450, 400, 200, 0, 0}, {400, 450, 400, 2000, 0, 0}};
+    static const pjmedia_tone_desc trill[] = {
+        {1000, 0, 50, 0, 0, 0}, {1250, 0, 50, 0, 0, 0}, {1000, 0, 50, 0, 0, 0}, {1250, 0, 50, 0, 0, 0},
+        {1000, 0, 50, 0, 0, 0}, {1250, 0, 50, 0, 0, 0}, {1000, 0, 50, 0, 0, 0}, {1250, 0, 50, 0, 0, 0},
+        {1000, 0, 50, 0, 0, 0}, {1250, 0, 50, 0, 0, 0}, {1000, 0, 50, 0, 0, 0}, {1250, 0, 50, 0, 0, 0},
+        {1000, 0, 50, 0, 0, 0}, {1250, 0, 50, 0, 0, 0}, {1000, 0, 50, 0, 0, 0}, {1250, 0, 50, 0, 0, 0},
+        {1000, 0, 50, 0, 0, 0}, {1250, 0, 50, 0, 0, 0}, {1000, 0, 50, 0, 0, 0}, {1250, 0, 50, 2000, 0, 0},
+    };
+    static const pjmedia_tone_desc marimba[] = {{523, 0, 150, 30, 0, 0}, {659, 0, 150, 30, 0, 0}, {784, 0, 300, 1800, 0, 0}};
+    static const pjmedia_tone_desc pulse[] = {{750, 0, 150, 150, 0, 0}, {750, 0, 150, 150, 0, 0}, {750, 0, 150, 2000, 0, 0}};
+    static const pjmedia_tone_desc ringback_eu[] = {{425, 0, 1000, 4000, 7000, 0}};
+    static const pjmedia_tone_desc ringback_uk[] = {{400, 450, 400, 200, 7000, 0}, {400, 450, 400, 2000, 7000, 0}};
+    static const pjmedia_tone_desc ringback_soft[] = {{494, 0, 400, 2600, 5000, 0}};
+    const pjmedia_tone_desc *src;
+    unsigned count;
+#define PV_PATTERN(a) (src = (a), count = PJ_ARRAY_SIZE(a))
+    switch (kind) {
+    case PV_TONE_RINGBACK:      PV_PATTERN(ringback); break;
+    case PV_TONE_RING:          PV_PATTERN(ring); break;
+    case PV_TONE_CLASSIC:       PV_PATTERN(classic); break;
+    case PV_TONE_TRILL:         PV_PATTERN(trill); break;
+    case PV_TONE_MARIMBA:       PV_PATTERN(marimba); break;
+    case PV_TONE_PULSE:         PV_PATTERN(pulse); break;
+    case PV_TONE_RINGBACK_EU:   PV_PATTERN(ringback_eu); break;
+    case PV_TONE_RINGBACK_UK:   PV_PATTERN(ringback_uk); break;
+    case PV_TONE_RINGBACK_SOFT: PV_PATTERN(ringback_soft); break;
+    default: return -3;
+    }
+#undef PV_PATTERN
+    if (volume <= 0) return 0;
+    if (volume > 1) volume = 1;
+    pjmedia_tone_desc tones[PJ_ARRAY_SIZE(trill)];
     for (unsigned i = 0; i < count; i++) {
-        float v = (src[i].volume ? src[i].volume : PJMEDIA_TONEGEN_VOLUME) * gain;
         tones[i] = src[i];
-        tones[i].volume = (short)(v < 1 ? 1 : v > 32767 ? 32767 : v);
+        tones[i].volume = tone_volume(src[i].volume, volume);
     }
 
-    playback = playback_dev(playback);
     g_tone_pool = pjsua_pool_create("tone", 1024, 1024);
     if (!g_tone_pool) return -3;
     if (pjmedia_tonegen_create(g_tone_pool, TONE_RATE, 1, TONE_FRAME, 16, 0, &g_tone_gen) != PJ_SUCCESS ||
-        pjmedia_tonegen_play(g_tone_gen, count, tones, PJMEDIA_TONEGEN_LOOP) != PJ_SUCCESS ||
-        pjmedia_snd_port_create_player(g_tone_pool, playback, TONE_RATE, 1, TONE_FRAME, 16, 0, &g_tone_snd) != PJ_SUCCESS ||
-        pjmedia_snd_port_connect(g_tone_snd, g_tone_gen) != PJ_SUCCESS) {
+        pjmedia_tonegen_play(g_tone_gen, count, tones, PJMEDIA_TONEGEN_LOOP) != PJ_SUCCESS) {
         tone_stop();
         return -4;
     }
-    return 0;
+    return play_port(g_tone_pool, g_tone_gen, playback, &g_tone_snd, tone_stop);
+}
+
+/* Custom sounds: a WAV file player behind a port that scales it by a volume
+ * (the player has none). Destroying it destroys the player. */
+typedef struct gain_port {
+    pjmedia_port base;
+    pjmedia_port *src;
+    float gain;
+} gain_port;
+
+static pj_status_t gain_get_frame(pjmedia_port *port, pjmedia_frame *frame) {
+    gain_port *g = (gain_port *)port;
+    pj_status_t st = pjmedia_port_get_frame(g->src, frame);
+    if (st != PJ_SUCCESS || frame->type != PJMEDIA_FRAME_TYPE_AUDIO) return st;
+    pj_int16_t *s = (pj_int16_t *)frame->buf;
+    for (pj_size_t i = 0; i < frame->size / 2; i++) {
+        float v = s[i] * g->gain;
+        s[i] = (pj_int16_t)(v > 32767 ? 32767 : v < -32768 ? -32768 : v);
+    }
+    return st;
+}
+
+static pj_status_t gain_on_destroy(pjmedia_port *port) {
+    return pjmedia_port_destroy(((gain_port *)port)->src);
+}
+
+/* Opens `wav_path` (looping or not) at `volume` into *out. Returns the
+ * file's length in ms, or -5. */
+static int open_wav(pj_pool_t *pool, const char *wav_path, int loop, float volume, pjmedia_port **out) {
+    pjmedia_port *player;
+    if (pjmedia_wav_player_port_create(pool, wav_path, 20, loop ? 0 : PJMEDIA_FILE_NO_LOOP, 0, &player) != PJ_SUCCESS)
+        return -5;
+    const pjmedia_audio_format_detail *f = pjmedia_format_get_audio_format_detail(&player->info.fmt, PJ_TRUE);
+    if (f->bits_per_sample != 16) {
+        pjmedia_port_destroy(player);
+        return -5;
+    }
+    gain_port *g = PJ_POOL_ZALLOC_T(pool, gain_port);
+    pj_str_t name = pj_str("gain");
+    pjmedia_port_info_init(&g->base.info, &name, PJMEDIA_SIGNATURE('p', 'v', 'g', 'n'), f->clock_rate,
+                           f->channel_count, 16, PJMEDIA_PIA_SPF(&player->info));
+    g->base.get_frame = &gain_get_frame;
+    g->base.on_destroy = &gain_on_destroy;
+    g->src = player;
+    g->gain = volume;
+    *out = &g->base;
+    pj_ssize_t bytes = pjmedia_wav_player_get_len(player);
+    unsigned per_ms = f->clock_rate * f->channel_count * 2 / 1000;
+    return bytes > 0 && per_ms ? (int)(bytes / per_ms) : 0;
+}
+
+int pv_tone_file(const char *wav_path, float volume, int playback) {
+    if (!g_started) return -1;
+    ensure_thread();
+    tone_stop();
+    if (g_null_audio) return -2;
+    if (volume <= 0) return 0;
+    if (volume > 1) volume = 1;
+    g_tone_pool = pjsua_pool_create("tone", 1024, 1024);
+    if (!g_tone_pool) return -3;
+    if (open_wav(g_tone_pool, wav_path, 1, volume, &g_tone_gen) < 0) {
+        tone_stop();
+        return -5;
+    }
+    return play_port(g_tone_pool, g_tone_gen, playback, &g_tone_snd, tone_stop);
 }
 
 /* Message sounds: like the ring tones, generated, but played once. Volume
@@ -696,22 +800,38 @@ int pv_notify(int kind, float volume, int playback) {
     pjmedia_tone_desc tones[2];
     int len_ms = 0;
     for (unsigned i = 0; i < count; i++) {
-        float v = (src[i].volume ? src[i].volume : PJMEDIA_TONEGEN_VOLUME) * volume;
         tones[i] = src[i];
-        tones[i].volume = (short)(v < 1 ? 1 : v);
+        tones[i].volume = tone_volume(src[i].volume, volume);
         len_ms += src[i].on_msec + src[i].off_msec;
     }
 
     g_notify_pool = pjsua_pool_create("notify", 1024, 1024);
     if (!g_notify_pool) return -4;
     if (pjmedia_tonegen_create(g_notify_pool, TONE_RATE, 1, TONE_FRAME, 16, 0, &g_notify_gen) != PJ_SUCCESS ||
-        pjmedia_tonegen_play(g_notify_gen, count, tones, 0) != PJ_SUCCESS ||
-        pjmedia_snd_port_create_player(g_notify_pool, playback_dev(playback), TONE_RATE, 1, TONE_FRAME, 16, 0, &g_notify_snd) != PJ_SUCCESS ||
-        pjmedia_snd_port_connect(g_notify_snd, g_notify_gen) != PJ_SUCCESS) {
+        pjmedia_tonegen_play(g_notify_gen, count, tones, 0) != PJ_SUCCESS) {
         notify_stop();
         return -4;
     }
-    return len_ms;
+    int rc = play_port(g_notify_pool, g_notify_gen, playback, &g_notify_snd, notify_stop);
+    return rc < 0 ? rc : len_ms;
+}
+
+int pv_notify_file(const char *wav_path, float volume, int playback) {
+    if (!g_started) return -1;
+    ensure_thread();
+    notify_stop();
+    if (g_null_audio) return -2;
+    if (volume <= 0) return 0;
+    if (volume > 1) volume = 1;
+    g_notify_pool = pjsua_pool_create("notify", 1024, 1024);
+    if (!g_notify_pool) return -4;
+    int len_ms = open_wav(g_notify_pool, wav_path, 0, volume, &g_notify_gen);
+    if (len_ms < 0) {
+        notify_stop();
+        return -5;
+    }
+    int rc = play_port(g_notify_pool, g_notify_gen, playback, &g_notify_snd, notify_stop);
+    return rc < 0 ? rc : len_ms;
 }
 
 void pv_notify_stop(void) {

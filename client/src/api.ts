@@ -122,6 +122,11 @@ export interface VoiceStatus {
 }
 
 export type MessageSound = "chime" | "pop" | "ding" | "soft";
+/** Built-in ring tones (#13): for incoming calls, and while calling. */
+export type RingSound = "chirp" | "classic" | "trill" | "marimba" | "pulse";
+export type RingbackSound = "ringback" | "ringback_eu" | "ringback_uk" | "ringback_soft";
+/** Where a custom sound file is used. */
+export type SoundSlot = "ring" | "ringback" | "message";
 
 export interface AudioDevice {
   index: number;
@@ -245,10 +250,20 @@ export const api = {
   /** mic and output 0-1, each boost 0 (off) to 15 dB. */
   voiceSetLevels: (mic: number, boostDb: number, output: number, outputBoostDb: number) =>
     invoke<void>("voice_set_levels", { mic, boostDb, output, outputBoostDb }),
-  /** Ring tone on its own output stream; null stops it. playback = device index, null = default. */
-  voiceTone: (tone: "ring" | "ringback" | null, playback: number | null) => invoke<void>("voice_tone", { tone, playback }),
+  /** Ring tone on its own output stream; null stops it. sound: a built-in one, "custom" (the
+   * imported file) or null (the default); volume 0-1; playback = device index, null = default. */
+  voiceTone: (tone: "ring" | "ringback" | null, sound: RingSound | RingbackSound | "custom" | null, volume: number, playback: number | null) =>
+    invoke<void>("voice_tone", { tone, sound, volume, playback }),
   /** A message sound, played once. volume 0-1; playback = device index, null = default. */
-  voiceNotify: (sound: MessageSound, volume: number, playback: number | null) => invoke<void>("voice_notify", { sound, volume, playback }),
+  voiceNotify: (sound: MessageSound | "custom", volume: number, playback: number | null) =>
+    invoke<void>("voice_notify", { sound, volume, playback }),
+  /** Imports an audio file (WAV, MP3, OGG, FLAC) as a slot's custom sound, replacing its
+   * current one. ms: its length as stored; trimmed: it was cut to the slot's maximum. */
+  soundImport: async (slot: SoundSlot, file: File) =>
+    invoke<{ ms: number; trimmed: boolean }>("sound_import", new Uint8Array(await file.arrayBuffer()), {
+      headers: { slot, ext: file.name.includes(".") ? file.name.split(".").pop()!.toLowerCase() : "" },
+    }),
+  soundRemove: (slot: SoundSlot) => invoke<void>("sound_remove", { slot }),
   voiceAudioTest: (mode: "meter" | "loopback" | null) => invoke<void>("voice_audio_test", { mode }),
   voiceMicLevel: () => invoke<number>("voice_mic_level"),
   voiceCalls: () => invoke<Call[]>("voice_calls"),

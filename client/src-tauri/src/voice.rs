@@ -12,7 +12,8 @@ use url::Url;
 
 use crate::commands::AppState;
 use crate::error::{AppError, Result};
-use crate::voice_engine::{AudioTest, CallState, Device, Engine, EngineEvent, SipCredentials, Sound, Stats, Tone};
+use crate::sounds::{self, Slot};
+use crate::voice_engine::{AudioTest, CallState, Device, Engine, EngineEvent, SipCredentials, Sound, Stats, Tone, ToneSound};
 
 #[derive(Default)]
 pub struct Voice {
@@ -196,18 +197,66 @@ pub fn voice_set_levels(app: AppHandle, mic: f32, boost_db: f32, output: f32, ou
     Ok(())
 }
 
-/// Starts (or with null, stops) a ring tone: "ringback" while we're calling,
-/// "ring" for an incoming call. `playback` = device index, null = default.
-#[tauri::command]
-pub fn voice_tone(app: AppHandle, tone: Option<Tone>, playback: Option<i32>) -> Result<()> {
-    engine(&app)?.tone(tone, playback).map_err(internal)
+/// A built-in sound, or "custom": the slot's imported file (sounds.rs).
+#[derive(serde::Deserialize)]
+#[serde(untagged)]
+pub enum Choice<T> {
+    Custom(CustomTag),
+    Builtin(T),
 }
 
-/// Plays a message notification sound once at `volume` (0-1).
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CustomTag {
+    Custom,
+}
+
+/// Starts (or with null, stops) a ring tone: "ringback" while we're calling,
+/// "ring" for an incoming call, playing `sound` (null = the default for
+/// that tone) at `volume` (0-1). A custom sound that's gone or won't play
+/// falls back to the default. `playback` = device index, null = default.
+#[tauri::command]
+pub fn voice_tone(app: AppHandle, tone: Option<Tone>, sound: Option<Choice<ToneSound>>, volume: Option<f32>, playback: Option<i32>) -> Result<()> {
+    let eng = engine(&app)?;
+    let volume = volume.unwrap_or(1.0).clamp(0.0, 1.0);
+    let Some(tone) = tone else {
+        return eng.tone(None, 0.0, playback).map_err(internal);
+    };
+    let builtin = match sound {
+        Some(Choice::Builtin(s)) => s,
+        Some(Choice::Custom(_)) => {
+            let slot = if tone == Tone::Ring { Slot::Ring } else { Slot::Ringback };
+            match sounds::custom_path(&app, slot).map(|p| eng.tone_file(&p, volume, playback)) {
+                Some(Ok(())) => return Ok(()),
+                Some(Err(e)) => log::warn!("custom {slot:?} sound: {e}"),
+                None => {}
+            }
+            tone.default_sound()
+        }
+        None => tone.default_sound(),
+    };
+    eng.tone(Some(builtin), volume, playback).map_err(internal)
+}
+
+/// Plays a message notification sound once at `volume` (0-1): built-in, or
+/// "custom" (falling back to the default if that's gone or won't play).
 /// `playback` = device index, null = default.
 #[tauri::command]
-pub fn voice_notify(app: AppHandle, sound: Sound, volume: f32, playback: Option<i32>) -> Result<()> {
-    engine(&app)?.notify(sound, volume.clamp(0.0, 1.0), playback).map_err(internal)
+pub fn voice_notify(app: AppHandle, sound: Choice<Sound>, volume: f32, playback: Option<i32>) -> Result<()> {
+    let eng = engine(&app)?;
+    let volume = volume.clamp(0.0, 1.0);
+    let builtin = match sound {
+        Choice::Builtin(s) => s,
+        Choice::Custom(_) => {
+            match sounds::custom_path(&app, Slot::Message).map(|p| eng.notify_file(&p, volume, playback)) {
+                Some(Ok(())) => return Ok(()),
+                Some(Err(e)) => log::warn!("custom message sound: {e}"),
+                None => {}
+            }
+            Sound::Chime
+        }
+    };
+    eng.notify(builtin, volume, playback).map_err(internal)
 }
 
 /// Audio settings test: "meter" opens the microphone (see voice_mic_level),

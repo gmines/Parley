@@ -2,8 +2,8 @@
 // state (from the voice engine), and the widgets built on them: the call
 // bar, the incoming-call card and the conversation call button. Audio
 // settings are in views/audio.ts.
-import { api, errorMessage, type Call, type RealtimeEvent, type VoiceCallState, type VoiceEvent, type VoiceStats } from "./api";
-import { applyLevels, applySavedDevices, savedAutoLeave, savedPlaybackIndex } from "./audio";
+import { api, errorMessage, type Call, type RealtimeEvent, type RingbackSound, type RingSound, type VoiceCallState, type VoiceEvent, type VoiceStats } from "./api";
+import { applySavedDevices, savedAutoLeave, savedCallSounds, savedLevels, savedPlaybackIndex } from "./audio";
 import { avatar, h, toast } from "./dom";
 import { conversationTitle, store } from "./store";
 import { audioDialog } from "./views/audio";
@@ -35,8 +35,10 @@ let statsTimer: number | undefined;
 let ringing: { conversation: string; card: HTMLElement; stop: () => void } | null = null;
 // We started a call and nobody else is in it yet: the caller hears ringback.
 let ringback: { conversation: string; timer: number } | null = null;
-// Audio settings' "Test speakers": a few seconds of the ring tone.
-let speakerTest: number | undefined;
+/** A ring tone to play: which kind, which sound (null = the default), how loud (0-1). */
+type ToneRequest = { tone: "ring" | "ringback"; sound: RingSound | RingbackSound | "custom" | null; volume: number };
+// Audio settings' "Test speakers" and ring tone previews: a few seconds of a tone.
+let preview: { request: ToneRequest; timer: number } | null = null;
 
 function changed() {
   for (const fn of listeners) fn();
@@ -66,14 +68,23 @@ export const voice = {
     return mine;
   },
 
-  /** Plays the ring tone on the selected output for a few seconds. */
+  /** Plays the ring tone on the selected output for a few seconds, at the output volume. */
   testSpeakers() {
-    window.clearTimeout(speakerTest);
-    speakerTest = window.setTimeout(() => {
-      speakerTest = undefined;
-      updateTone();
-    }, 3500);
-    toneNow = null; // restart the tone, so it's audible from the start on the new device
+    voice.previewTone({ tone: "ring", sound: null, volume: Math.min(100, savedLevels().output) / 100 });
+  },
+
+  /** Plays a ring tone for a few seconds (audio settings), unless a call is ringing. */
+  previewTone(request: ToneRequest) {
+    if (preview) window.clearTimeout(preview.timer);
+    const timer = window.setTimeout(
+      () => {
+        preview = null;
+        updateTone();
+      },
+      request.tone === "ringback" ? 6500 : 3500, // one full cycle
+    );
+    preview = { request, timer };
+    toneNow = ""; // restart the tone, so it's audible from the start (on a new device, or a new sound)
     updateTone();
   },
 
@@ -433,31 +444,38 @@ function stopRingback() {
   updateTone();
 }
 
-/** Plays whichever tone applies: an incoming call's ring wins over our ringback. */
-let toneNow: "ring" | "ringback" | null = null;
+/** The ring tone the settings choose for `tone`, or null if it's turned off. */
+function callTone(tone: "ring" | "ringback"): ToneRequest | null {
+  const s = savedCallSounds();
+  return s[tone].enabled ? { tone, sound: s[tone].sound, volume: s.volume / 100 } : null;
+}
+
+/** Plays whichever tone applies: an incoming call's ring wins over our
+ * ringback, and either over a preview. */
+let toneNow = "null"; // the playing request, as JSON
 let toneSeq = 0;
 let webTone: (() => void) | null = null;
 async function updateTone() {
-  const want = ringing ? "ring" : ringback ? "ringback" : speakerTest !== undefined ? "ring" : null;
-  if (want === toneNow) return;
-  toneNow = want;
+  const want = ringing ? callTone("ring") : ringback ? callTone("ringback") : (preview?.request ?? null);
+  const key = JSON.stringify(want);
+  if (key === toneNow) return;
+  toneNow = key;
   const seq = ++toneSeq;
   webTone?.();
   webTone = null;
-  if (want) await applyLevels().catch(() => {}); // tones play at the output volume
   const playback = want ? await savedPlaybackIndex() : null;
   if (seq !== toneSeq) return; // changed again meanwhile: a newer call handles it
   try {
-    await api.voiceTone(want, playback);
+    await api.voiceTone(want?.tone ?? null, want?.sound ?? null, want?.volume ?? 0, playback);
   } catch {
     // The native engine couldn't play it: fall back to the webview (which may
     // stay silent until the user has interacted with the app).
-    if (want && seq === toneSeq) webTone = webAudioTone(want);
+    if (want && seq === toneSeq) webTone = webAudioTone(want.tone, want.volume);
   }
 }
 
-/** Fallback tones in the webview (generated, no audio files). Returns a stop function. */
-function webAudioTone(kind: "ring" | "ringback"): () => void {
+/** Fallback tones in the webview (the default ones, generated). Returns a stop function. */
+function webAudioTone(kind: "ring" | "ringback", volume: number): () => void {
   let ctx: AudioContext | null = null;
   let timer: number | undefined;
   try {
@@ -480,8 +498,8 @@ function webAudioTone(kind: "ring" | "ringback"): () => void {
     };
     const once =
       kind === "ring"
-        ? () => [[660, 0], [880, 0.25], [660, 0.9], [880, 1.15]].forEach(([f, at]) => beep([f], at, 0.22, 0.12))
-        : () => beep([440, 480], 0, 2, 0.06);
+        ? () => [[660, 0], [880, 0.25], [660, 0.9], [880, 1.15]].forEach(([f, at]) => beep([f], at, 0.22, 0.12 * volume))
+        : () => beep([440, 480], 0, 2, 0.06 * volume);
     once();
     timer = window.setInterval(once, kind === "ring" ? 3000 : 6000);
   } catch {

@@ -41,6 +41,8 @@ futures-util = { version = "0.3", default-features = false, features = ["std"] }
 tauri-plugin-log = "2"
 tauri-plugin-opener = "2"
 tauri-plugin-single-instance = "2"
+# Decodes custom ringtones / message sounds (sounds.rs): only the formats offered.
+symphonia = { version = "0.5", default-features = false, features = ["mp3", "flac", "ogg", "vorbis", "wav", "pcm"] }
 
 # Idle time and screen lock over D-Bus (idle.rs); already used by keyring.
 [target.'cfg(target_os = "linux")'.dependencies]
