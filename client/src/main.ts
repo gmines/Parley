@@ -1,4 +1,4 @@
-import { api, errorMessage, onRealtimeEvent, onRealtimeStatus, onVoiceEvent, type Conversation, type Features, type RealtimeEvent, type User, type UserRef } from "./api";
+import { api, errorCode, errorMessage, onRealtimeEvent, onRealtimeStatus, onVoiceEvent, type Conversation, type RealtimeEvent, type User, type UserRef } from "./api";
 import { avatar, h, mount, toast } from "./dom";
 import { conversationTitle, dmPeer, store } from "./store";
 import { callBar, disposeWidget, voice } from "./voice";
@@ -10,6 +10,7 @@ import { authView } from "./views/auth";
 import { conversationView, type ConversationView } from "./views/conversation";
 import { friendsView, type FriendsView } from "./views/friends";
 import { newCallDialog, newGroupDialog } from "./views/newgroup";
+import { mfaSetupView } from "./views/mfa";
 import { resetView } from "./views/reset";
 
 const root = document.getElementById("app")!;
@@ -21,12 +22,29 @@ async function start() {
   mount(root, h("main", { class: "splash" }, h("div", { class: "brand brand-lg", text: "Parley" })));
   try {
     const user = await api.restoreSession();
-    if (user) return showApp(user);
+    if (user) return enter(user);
     showAuth();
   } catch (e) {
     // Couldn't reach the server; the saved session (if any) is kept for next time.
     showAuth({ notice: `Couldn't restore your session: ${errorMessage(e)}` });
   }
+}
+
+/** The app, unless this account still has to set up MFA. */
+function enter(user: User) {
+  if (user.mfa_enabled) return showApp(user);
+  leaveApp();
+  mount(root, mfaSetupView(showApp, async () => {
+    await api.logout();
+    showAuth();
+  }));
+}
+
+/** The server now requires MFA for this session (it was upgraded, or MFA was reset elsewhere). */
+async function mfaNowRequired() {
+  const user = await api.currentUser().catch(() => null);
+  if (user) enter(user);
+  else showAuth();
 }
 
 function leaveApp() {
@@ -42,12 +60,12 @@ async function showAuth(opts: { server?: string; username?: string; notice?: str
   const server = opts.server ?? saved.server;
   // The saved username belongs to the saved server.
   const username = opts.username ?? (server === saved.server ? saved.username ?? undefined : undefined);
-  mount(root, authView({ ...opts, server, username, staySignedIn: saved.stay_signed_in, onAuthed: showApp, onForgot: showReset }));
+  mount(root, authView({ ...opts, server, username, staySignedIn: saved.stay_signed_in, onAuthed: enter, onForgot: showReset }));
 }
 
-function showReset(server: string, username: string, features: Features) {
+function showReset(server: string, username: string) {
   leaveApp();
-  mount(root, resetView(server, username, features, (opts) => showAuth({ server, ...opts })));
+  mount(root, resetView(server, username, (opts) => showAuth({ server, ...opts })));
 }
 
 function signedOut(message: string) {
@@ -217,7 +235,7 @@ function showApp(initialUser: User) {
             user = u;
             store.setMe(u);
             renderMe();
-          }, signedOut),
+          }, signedOut, enter),
         );
       });
     } else if (page.kind === "audio") {
@@ -345,13 +363,22 @@ function showApp(initialUser: User) {
     connection.className = `conn-dot conn-${state}`;
     connection.title = statusTitle[state] ?? state;
     if (state === "signed_out") signedOut("Your session has expired; please log in again.");
+    if (state === "mfa_required") mfaNowRequired();
   }
 
   const unlisteners = [onRealtimeEvent(onEvent), onRealtimeStatus(onStatus), onVoiceEvent((e) => voice.handleVoiceEvent(e))];
   api.realtimeStart().catch((e) => toast(errorMessage(e), "error"));
   store.load().catch((e) => toast(errorMessage(e), "error"));
 
+  // An open realtime socket outlives the token, so check for a new MFA requirement.
+  const mfaPoll = window.setInterval(() => {
+    api.fetchMe().catch((e) => {
+      if (errorCode(e) === "mfa_setup_required") mfaNowRequired();
+    });
+  }, 60_000);
+
   teardown = () => {
+    window.clearInterval(mfaPoll);
     friends?.dispose();
     conversation?.dispose();
     audio?.dispose();

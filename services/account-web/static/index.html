@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>Parley account</title>
+<link rel="stylesheet" href="/account/style.css">
+<script src="/account/app.js" defer></script>
+</head>
+<body>
+<main>
+  <p class="brand">Parley</p>
+  <h1 id="title">Checking your link…</h1>
+  <p id="intro"></p>
+  <form id="form" hidden>
+    <label>New password
+      <input id="password" type="password" autocomplete="new-password" minlength="8" maxlength="128" required>
+    </label>
+    <label>Confirm password
+      <input id="confirm" type="password" autocomplete="new-password" minlength="8" maxlength="128" required>
+    </label>
+    <p class="hint">Use a few unrelated words, like blue-kettle-drift. Common passwords and patterns like 12345678 are rejected.</p>
+    <p id="error" class="error" role="alert"></p>
+    <button id="submit" type="submit">Set password</button>
+  </form>
+  <noscript><p class="error">This page needs JavaScript to keep your link private.</p></noscript>
+</main>
+</body>
+</html>

@@ -32,7 +32,7 @@ func setup(t *testing.T, names ...string) *fixture {
 	for _, n := range names {
 		var id uuid.UUID
 		if err := pool.QueryRow(context.Background(),
-			`INSERT INTO users (username, display_name, password_hash) VALUES ($1, $1, 'x') RETURNING id`, n,
+			`INSERT INTO users (username, display_name, password_hash, activated_at) VALUES ($1, $1, 'x', now()) RETURNING id`, n,
 		).Scan(&id); err != nil {
 			t.Fatal(err)
 		}

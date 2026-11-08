@@ -526,3 +526,8 @@ input:focus { outline: none; border-color: var(--accent); }
 .custom-sound[hidden] { display: none; }
 .custom-sound-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
 .form-actions-start { justify-content: flex-start; }
+
+/* MFA setup */
+.mfa-qr { display: block; width: 200px; height: 200px; margin: 4px auto; border-radius: 8px; image-rendering: pixelated; }
+.mfa-secret { font-family: ui-monospace, monospace; font-size: 13px; word-break: break-all; text-align: center; user-select: text; }
+.mfa-codes { display: grid; grid-template-columns: 1fr 1fr; gap: 6px 16px; font-family: ui-monospace, monospace; font-size: 13px; user-select: text; }

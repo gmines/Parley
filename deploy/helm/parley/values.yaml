@@ -27,7 +27,7 @@ ingress:
 
 # Secrets. Either name an existing Secret, or let the chart create one.
 secrets:
-  # Existing Secret with keys: signing-key, verify-key, sip-secret, esl-password
+  # Existing Secret with keys: signing-key, verify-key, sip-secret, esl-password, mfa-key
   # (and database-url when postgres.enabled=false and no externalDatabase secret).
   existingSecret: ""
   # Access-token key pair (required unless existingSecret is set). Generate with:
@@ -38,6 +38,9 @@ secrets:
   sipSecret: ""
   # FreeSWITCH Event Socket password; generated if empty. Letters, digits, '_' and '-' only.
   eslPassword: ""
+  # Base64 32-byte key sealing users' authenticator secrets; generated (and
+  # kept across upgrades) if empty. Back it up: losing it breaks every user's MFA.
+  mfaKey: ""
 
 api:
   replicas: 2
@@ -53,6 +56,36 @@ api:
   resources:
     requests: { cpu: 50m, memory: 64Mi }
     limits: { memory: 256Mi }
+
+# The public page behind sign-up and password-reset links. Needs email or SMS
+# configured under api.extraEnv. See README.md for the Cloudflare setup.
+accountWeb:
+  enabled: false
+  # Its own hostname, e.g. account.example.org. Must differ from `host`, which
+  # stays DNS-only for SIP, so this one can be proxied through a WAF.
+  host: ""
+  replicas: 2
+  ingress:
+    enabled: true
+    # e.g. cert-manager.io/cluster-issuer: letsencrypt
+    annotations: {}
+    # Default: <release>-account-web-tls.
+    tlsSecretName: ""
+  # Accept TLS for this host only from Cloudflare (Authenticated Origin Pulls),
+  # so the WAF can't be bypassed via the server's public IP. Traefik only.
+  originPull:
+    enabled: false
+    # Secret in this namespace with Cloudflare's origin-pull CA as key ca.crt.
+    caSecret: ""
+  networkPolicy:
+    enabled: true
+    # Where the ingress controller runs (these defaults are k3s's Traefik).
+    ingressNamespace: kube-system
+    ingressPodLabels:
+      app.kubernetes.io/name: traefik
+  resources:
+    requests: { cpu: 10m, memory: 16Mi }
+    limits: { memory: 64Mi }
 
 realtime:
   replicas: 2

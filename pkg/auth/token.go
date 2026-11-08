@@ -14,7 +14,14 @@ import (
 	"github.com/google/uuid"
 )
 
-const issuer = "parley"
+const (
+	issuer = "parley"
+	// Restricted tokens use their own issuers instead of a claim: a verifier
+	// that knows nothing about them (every service's Verify, including older
+	// builds) rejects them outright, so a new restriction can't fail open.
+	enrollmentIssuer = "parley-mfa-enroll"
+	challengeIssuer  = "parley-mfa-challenge"
+)
 
 var ErrInvalidToken = errors.New("invalid token")
 
@@ -42,12 +49,28 @@ func NewSigner(key ed25519.PrivateKey, ttl time.Duration) *Signer {
 
 // Sign returns a signed access token and its expiry.
 func (s *Signer) Sign(c Claims) (string, time.Time, error) {
+	return s.sign(issuer, c, s.ttl)
+}
+
+// SignEnrollment returns a token that can only be used to set up MFA. Accounts
+// without MFA get these instead of access tokens.
+func (s *Signer) SignEnrollment(c Claims) (string, time.Time, error) {
+	return s.sign(enrollmentIssuer, c, s.ttl)
+}
+
+// SignChallenge returns a token proving the password step of a login, to be
+// presented with the MFA code.
+func (s *Signer) SignChallenge(c Claims, ttl time.Duration) (string, time.Time, error) {
+	return s.sign(challengeIssuer, c, ttl)
+}
+
+func (s *Signer) sign(iss string, c Claims, ttl time.Duration) (string, time.Time, error) {
 	now := s.now()
-	exp := now.Add(s.ttl)
+	exp := now.Add(ttl)
 	tok := jwt.NewWithClaims(jwt.SigningMethodEdDSA, jwtClaims{
 		Username: c.Username,
 		RegisteredClaims: jwt.RegisteredClaims{
-			Issuer:    issuer,
+			Issuer:    iss,
 			Subject:   c.UserID.String(),
 			IssuedAt:  jwt.NewNumericDate(now),
 			ExpiresAt: jwt.NewNumericDate(exp),
@@ -62,25 +85,35 @@ func (s *Signer) Sign(c Claims) (string, time.Time, error) {
 
 // Verifier validates access tokens.
 type Verifier struct {
-	key    ed25519.PublicKey
-	parser *jwt.Parser
+	key ed25519.PublicKey
 }
 
 func NewVerifier(key ed25519.PublicKey) *Verifier {
-	return &Verifier{
-		key: key,
-		parser: jwt.NewParser(
-			jwt.WithValidMethods([]string{jwt.SigningMethodEdDSA.Alg()}),
-			jwt.WithIssuer(issuer),
-			jwt.WithExpirationRequired(),
-			jwt.WithLeeway(5*time.Second),
-		),
-	}
+	return &Verifier{key: key}
 }
 
-func (v *Verifier) Verify(token string) (Claims, error) {
+// Verify accepts full access tokens only.
+func (v *Verifier) Verify(token string) (Claims, error) { return v.verify(issuer, token) }
+
+// VerifyEnrollment accepts only MFA enrollment tokens.
+func (v *Verifier) VerifyEnrollment(token string) (Claims, error) {
+	return v.verify(enrollmentIssuer, token)
+}
+
+// VerifyChallenge accepts only MFA login challenge tokens.
+func (v *Verifier) VerifyChallenge(token string) (Claims, error) {
+	return v.verify(challengeIssuer, token)
+}
+
+func (v *Verifier) verify(iss, token string) (Claims, error) {
+	parser := jwt.NewParser(
+		jwt.WithValidMethods([]string{jwt.SigningMethodEdDSA.Alg()}),
+		jwt.WithIssuer(iss),
+		jwt.WithExpirationRequired(),
+		jwt.WithLeeway(5*time.Second),
+	)
 	var jc jwtClaims
-	_, err := v.parser.ParseWithClaims(token, &jc, func(*jwt.Token) (any, error) { return v.key, nil })
+	_, err := parser.ParseWithClaims(token, &jc, func(*jwt.Token) (any, error) { return v.key, nil })
 	if err != nil {
 		return Claims{}, ErrInvalidToken
 	}

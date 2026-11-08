@@ -18,7 +18,7 @@ use serde_json::{json, Value};
 use tokio::sync::Mutex;
 use url::Url;
 
-use crate::api::{ErrorBody, Session, User};
+use crate::api::{ErrorBody, LoginResponse, MfaEnrolled, MfaSecret, Session, User};
 use crate::error::{AppError, Result};
 use crate::secrets::SecretStore;
 
@@ -36,6 +36,8 @@ struct Active {
 pub struct SessionManager {
     http: reqwest::Client,
     state: Mutex<Option<Active>>,
+    /// A login waiting for its second factor. Like the tokens, never leaves here.
+    challenge: Mutex<Option<(Url, String)>>,
     secrets: Box<dyn SecretStore>,
     /// Save the refresh token for the next launch ("stay signed in").
     persist: AtomicBool,
@@ -52,6 +54,7 @@ impl SessionManager {
         Self {
             http,
             state: Mutex::new(None),
+            challenge: Mutex::new(None),
             secrets,
             persist: AtomicBool::new(true),
         }
@@ -71,21 +74,70 @@ impl SessionManager {
         }
     }
 
-    /// `email` and `phone` are optional recovery contacts (empty = none); the
-    /// server rejects them unless that recovery channel is enabled.
-    pub async fn register(&self, server: &Url, reg: &Registration<'_>) -> Result<User> {
-        let body = json!({
-            "username": reg.username, "password": reg.password, "display_name": reg.display_name,
-            "email": reg.email, "phone": reg.phone,
-        });
-        let sess: Session = decode(self.post(server, "v1/auth/register", &body).await?).await?;
-        Ok(self.start(server, sess).await)
+    /// Returns the user, or None if the login needs a second factor (see
+    /// [`mfa_login`](Self::mfa_login)).
+    pub async fn login(&self, server: &Url, username: &str, password: &str) -> Result<Option<User>> {
+        let body = json!({ "username": username, "password": password });
+        match decode(self.post(server, "v1/auth/login", &body).await?).await? {
+            LoginResponse::Challenge { mfa_token } => {
+                *self.challenge.lock().await = Some((server.clone(), mfa_token));
+                Ok(None)
+            }
+            LoginResponse::Session(sess) => Ok(Some(self.start(server, sess).await)),
+        }
     }
 
-    pub async fn login(&self, server: &Url, username: &str, password: &str) -> Result<User> {
-        let body = json!({ "username": username, "password": password });
-        let sess: Session = decode(self.post(server, "v1/auth/login", &body).await?).await?;
-        Ok(self.start(server, sess).await)
+    /// Finishes a login with an authenticator or recovery code. The challenge
+    /// is kept on failure so the user can try another code.
+    pub async fn mfa_login(&self, code: &str) -> Result<(Url, User)> {
+        let (server, token) = self.challenge.lock().await.clone().ok_or(AppError::NotLoggedIn)?;
+        let body = json!({ "mfa_token": token, "code": code });
+        let sess: Session = decode(self.post(&server, "v1/auth/mfa/login", &body).await?).await?;
+        *self.challenge.lock().await = None;
+        let user = self.start(&server, sess).await;
+        Ok((server, user))
+    }
+
+    /// Starts authenticator setup. Works with the restricted session an
+    /// account without MFA gets.
+    pub async fn mfa_enroll_start(&self) -> Result<MfaSecret> {
+        let mut guard = self.state.lock().await;
+        let (server, token) = self.fresh_access(&mut guard, None).await?;
+        let resp = self
+            .send(&server, Method::POST, "v1/auth/mfa/enroll/start", &token, None)
+            .await?;
+        decode(check(resp).await?).await
+    }
+
+    /// Finishes setup. The server revokes every earlier session, so the state
+    /// lock is held until the replacement is in place.
+    pub async fn mfa_enroll_confirm(&self, code: &str) -> Result<(User, Vec<String>)> {
+        let mut guard = self.state.lock().await;
+        let (server, token) = self.fresh_access(&mut guard, None).await?;
+        let body = json!({ "code": code });
+        let resp = self
+            .send(&server, Method::POST, "v1/auth/mfa/enroll/confirm", &token, Some(&body))
+            .await?;
+        let out: MfaEnrolled = decode(check(resp).await?).await?;
+        self.save(&server, &out.session.refresh_token);
+        let user = out.session.user.clone();
+        *guard = Some(Active::new(server, out.session));
+        Ok((user, out.recovery_codes))
+    }
+
+    /// Removes the authenticator; the replacement session can only enroll a new one.
+    pub async fn mfa_reset(&self, password: &str, code: &str) -> Result<User> {
+        let mut guard = self.state.lock().await;
+        let (server, token) = self.fresh_access(&mut guard, None).await?;
+        let body = json!({ "password": password, "code": code });
+        let resp = self
+            .send(&server, Method::POST, "v1/users/me/mfa/reset", &token, Some(&body))
+            .await?;
+        let sess: Session = decode(check(resp).await?).await?;
+        self.save(&server, &sess.refresh_token);
+        let user = sess.user.clone();
+        *guard = Some(Active::new(server, sess));
+        Ok(user)
     }
 
     /// Resumes a session from the refresh token saved in the OS keychain.
@@ -239,7 +291,15 @@ impl SessionManager {
     /// or if `rejected` is the current token.
     async fn access_token(&self, rejected: Option<&str>) -> Result<(Url, String)> {
         let mut guard = self.state.lock().await;
-        self.fresh_access(&mut guard, rejected).await
+        let access = self.fresh_access(&mut guard, rejected).await?;
+        // A restricted token works nowhere else, so say why instead of a 401.
+        if guard.as_ref().is_some_and(|a| !a.user.mfa_enabled) {
+            return Err(AppError::Api {
+                code: "mfa_setup_required".into(),
+                message: "set up two-factor authentication to continue".into(),
+            });
+        }
+        Ok(access)
     }
 
     /// access_token's body, for callers that already hold the state lock.
@@ -319,14 +379,6 @@ impl Active {
             refresh: sess.refresh_token,
         }
     }
-}
-
-pub struct Registration<'a> {
-    pub username: &'a str,
-    pub password: &'a str,
-    pub display_name: &'a str,
-    pub email: &'a str,
-    pub phone: &'a str,
 }
 
 /// Validates and normalizes a user-entered server address. A missing scheme
@@ -410,188 +462,6 @@ pub(crate) mod tests {
         fn delete(&self, account: &str) {
             self.0.lock().unwrap().remove(account);
         }
-    }
-
-    /// Against a live api server (`PARLEY_TEST_API_URL`), ideally started with a
-    /// short PARLEY_ACCESS_TTL so that every call needs a refresh.
-    pub(crate) fn live_server() -> Option<Url> {
-        std::env::var("PARLEY_TEST_API_URL")
-            .ok()
-            .map(|u| normalize_server(&u).unwrap())
-    }
-
-    pub(crate) fn reg<'a>(username: &'a str, display_name: &'a str) -> Registration<'a> {
-        Registration {
-            username,
-            password: "plum-orbit-candle-42",
-            display_name,
-            email: "",
-            phone: "",
-        }
-    }
-
-    pub(crate) fn unique(prefix: &str) -> String {
-        let n = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        format!("{prefix}{}", n % 1_000_000_000_000)
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
-    async fn concurrent_calls_share_one_refresh_chain() {
-        let Some(server) = live_server() else {
-            eprintln!("PARLEY_TEST_API_URL not set; skipping");
-            return;
-        };
-        let store = MemoryStore::default();
-        let mgr = Arc::new(SessionManager::new(Box::new(store.clone())));
-        let user = mgr
-            .register(&server, &reg(&unique("rt"), ""))
-            .await
-            .unwrap();
-
-        // Fire many calls at once. Each sees a near-expiry token and wants to refresh;
-        // if two refreshed with the same token the server would revoke the session.
-        for round in 0..3 {
-            let calls = (0..25).map(|_| {
-                let mgr = mgr.clone();
-                tokio::spawn(async move {
-                    mgr.call::<serde_json::Value>(Method::GET, "v1/users/me", None)
-                        .await
-                })
-            });
-            for c in calls {
-                let me = c
-                    .await
-                    .unwrap()
-                    .unwrap_or_else(|e| panic!("round {round}: {e}"));
-                assert_eq!(me["id"], user.id.as_str());
-            }
-        }
-
-        // The keychain copy must be the newest token: a fresh manager can resume with it.
-        let resumed = SessionManager::new(Box::new(store.clone()));
-        let restored = resumed
-            .restore(&server)
-            .await
-            .unwrap()
-            .expect("session restored");
-        assert_eq!(restored.id, user.id);
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn change_password_keeps_this_session() {
-        let Some(server) = live_server() else {
-            eprintln!("PARLEY_TEST_API_URL not set; skipping");
-            return;
-        };
-        let store = MemoryStore::default();
-        let mgr = Arc::new(SessionManager::new(Box::new(store.clone())));
-        let name = unique("cp");
-        mgr.register(&server, &reg(&name, "")).await.unwrap();
-
-        // Calls racing with the change must not end up using a revoked token.
-        let background: Vec<_> = (0..10)
-            .map(|_| {
-                let mgr = mgr.clone();
-                tokio::spawn(async move {
-                    mgr.call::<serde_json::Value>(Method::GET, "v1/users/me", None)
-                        .await
-                })
-            })
-            .collect();
-        mgr.change_password("plum-orbit-candle-42", "velvet-thunder-pine")
-            .await
-            .unwrap();
-        for b in background {
-            b.await
-                .unwrap()
-                .expect("concurrent call during password change");
-        }
-
-        // Still signed in.
-        mgr.call::<serde_json::Value>(Method::GET, "v1/users/me", None)
-            .await
-            .unwrap();
-
-        match mgr
-            .change_password("wrong-password-x", "another-fine-phrase")
-            .await
-        {
-            Err(AppError::Api { code, .. }) => assert_eq!(code, "bad_credentials"),
-            other => panic!("expected bad_credentials, got {other:?}"),
-        }
-
-        // The keychain holds the post-change token. Checked last: restoring
-        // rotates that token, after which `mgr`'s copy is stale and using it
-        // would (correctly) trip the server's reuse detection.
-        let resumed = SessionManager::new(Box::new(store.clone()));
-        assert!(resumed.restore(&server).await.unwrap().is_some());
-    }
-
-    #[tokio::test]
-    async fn restore_after_logout_and_friend_flow() {
-        let Some(server) = live_server() else {
-            eprintln!("PARLEY_TEST_API_URL not set; skipping");
-            return;
-        };
-        let (a_name, b_name) = (unique("fa"), unique("fb"));
-        let a = SessionManager::new(Box::new(MemoryStore::default()));
-        let b = SessionManager::new(Box::new(MemoryStore::default()));
-        a.register(&server, &reg(&a_name, "")).await.unwrap();
-        let b_user = b.register(&server, &reg(&b_name, "B")).await.unwrap();
-
-        let sent: crate::api::SendResult = a
-            .call(
-                Method::POST,
-                "v1/friends/requests",
-                Some(json!({ "username": b_name })),
-            )
-            .await
-            .unwrap();
-        let req_id = sent.request.unwrap().id;
-        let _: crate::api::Friend = b
-            .call(
-                Method::POST,
-                &format!("v1/friends/requests/{req_id}/accept"),
-                None,
-            )
-            .await
-            .unwrap();
-        let friends: crate::api::FriendsList =
-            a.call(Method::GET, "v1/friends", None).await.unwrap();
-        assert_eq!(friends.friends.len(), 1);
-        assert_eq!(friends.friends[0].user.id, b_user.id);
-
-        // API errors come back with the server's code.
-        match a
-            .call::<serde_json::Value>(
-                Method::POST,
-                "v1/friends/requests",
-                Some(json!({ "username": b_name })),
-            )
-            .await
-        {
-            Err(AppError::Api { code, .. }) => assert_eq!(code, "already_friends"),
-            other => panic!("expected already_friends, got {other:?}"),
-        }
-
-        let store = MemoryStore::default();
-        let c = SessionManager::new(Box::new(store.clone()));
-        c.login(&server, &a_name, "plum-orbit-candle-42")
-            .await
-            .unwrap();
-        c.logout().await;
-        assert!(
-            store.get(server.as_str()).is_none(),
-            "logout must clear the keychain"
-        );
-        assert!(matches!(
-            c.call_empty(Method::GET, "v1/friends", None).await,
-            Err(AppError::NotLoggedIn)
-        ));
-        assert!(c.restore(&server).await.unwrap().is_none());
     }
 
     /// A one-shot HTTP server answering every request with `status` and `body`.

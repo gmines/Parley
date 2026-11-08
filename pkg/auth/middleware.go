@@ -11,6 +11,11 @@ type ctxKey struct{}
 // Middleware rejects requests without a valid "Authorization: Bearer" token and
 // stores the token's claims in the request context.
 func Middleware(v *Verifier, unauthorized http.Handler) func(http.Handler) http.Handler {
+	return MiddlewareFunc(v.Verify, unauthorized)
+}
+
+// MiddlewareFunc is Middleware with a chosen token check.
+func MiddlewareFunc(verify func(string) (Claims, error), unauthorized http.Handler) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			raw, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
@@ -18,7 +23,7 @@ func Middleware(v *Verifier, unauthorized http.Handler) func(http.Handler) http.
 				unauthorized.ServeHTTP(w, r)
 				return
 			}
-			claims, err := v.Verify(strings.TrimSpace(raw))
+			claims, err := verify(strings.TrimSpace(raw))
 			if err != nil {
 				unauthorized.ServeHTTP(w, r)
 				return

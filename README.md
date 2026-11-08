@@ -43,6 +43,7 @@ make test-db dev-nats
 # api: logs its token public key as PARLEY_VERIFY_KEY at startup
 PARLEY_DATABASE_URL='postgres://postgres:parley@localhost:55432/parley?sslmode=disable' \
 PARLEY_SIGNING_KEY="$(openssl rand -base64 32)" \
+PARLEY_MFA_KEY="$(openssl rand -base64 32)" \
 PARLEY_NATS_URL=nats://127.0.0.1:4222 \
 PARLEY_REALTIME_PUBLIC_URL=ws://<this host>:8081/v1/realtime \
 go run ./services/api
@@ -90,6 +91,7 @@ API reference: [`api/openapi.yaml`](api/openapi.yaml). Realtime events: [`api/ev
 |---|---|---|
 | `PARLEY_DATABASE_URL` | (required) | Postgres URL; migrations run on startup |
 | `PARLEY_SIGNING_KEY` | (required) | base64 32-byte Ed25519 seed (`openssl rand -base64 32`) |
+| `PARLEY_MFA_KEY` | (required) | base64 32-byte key sealing TOTP secrets (`openssl rand -base64 32`) |
 | `PARLEY_LISTEN_ADDR` | `:8080` | |
 | `PARLEY_ACCESS_TTL` | `15m` | access token lifetime |
 | `PARLEY_REFRESH_TTL` | `720h` | refresh token lifetime |

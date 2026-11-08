@@ -21,34 +21,104 @@ security:
   - bearer: []
 
 paths:
-  /v1/auth/register:
+  /v1/auth/signup:
     post:
       security: []
+      summary: Request a new account
+      description: |
+        Creates an inactive account and sends a link (valid 24 hours) to the
+        email or phone, where the owner chooses a password. Exactly one of
+        email and phone is required. An address already used by an account
+        gets the same 202 and no message. Usernames are public, so a taken
+        one answers 409.
       requestBody:
         required: true
         content:
           application/json:
             schema:
               type: object
-              required: [username, password]
+              required: [username]
               properties:
                 username: { type: string, pattern: '^[a-zA-Z0-9_.]{2,32}$', description: Stored lowercased }
-                password:
-                  type: string
-                  minLength: 8
-                  maxLength: 128
-                  description: |
-                    Must not be easy to guess (zxcvbn score >= 3): common passwords,
-                    sequences, keyboard patterns and passwords built from the
-                    username or display name are rejected with `weak_password`,
-                    whose message says why. No character-class rules.
                 display_name: { type: string, maxLength: 32, description: Defaults to username }
-                email: { type: string, description: 'Optional recovery email. Only accepted when email recovery is enabled (else 403 feature_disabled). A verification code is sent to it.' }
-                phone: { type: string, description: 'Optional recovery phone, E.164 (+15551234567). Only accepted when SMS recovery is enabled.' }
+                email: { type: string }
+                phone: { type: string, description: 'E.164, e.g. +15551234567' }
       responses:
-        '201': { $ref: '#/components/responses/Session' }
+        '202': { description: Accepted }
         '400': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
         '409': { $ref: '#/components/responses/Error' }
+        '429': { $ref: '#/components/responses/Error' }
+  /v1/auth/mfa/login:
+    post:
+      security: []
+      summary: Finish a login with an authenticator or recovery code
+      description: |
+        When an account has MFA, /v1/auth/login answers
+        `{mfa_required, mfa_token, mfa_expires_at}` instead of a session.
+        Present the token here within 5 minutes.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [mfa_token, code]
+              properties:
+                mfa_token: { type: string }
+                code: { type: string }
+      responses:
+        '200': { $ref: '#/components/responses/Session' }
+        '400': { $ref: '#/components/responses/Error' }
+        '429': { $ref: '#/components/responses/Error' }
+  /v1/auth/mfa/enroll/start:
+    post:
+      summary: Create an authenticator secret
+      description: |
+        MFA is mandatory. Sessions for accounts without it (`user.mfa_enabled`
+        false) carry an enrollment token, accepted only by these two
+        endpoints and rejected everywhere else.
+      responses:
+        '200': { description: 'JSON with secret and otpauth_uri' }
+        '401': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+  /v1/auth/mfa/enroll/confirm:
+    post:
+      summary: Turn on MFA with a first code
+      description: Revokes every other session. Answers a full session plus `recovery_codes`, shown only here.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [code]
+              properties:
+                code: { type: string }
+      responses:
+        '200': { description: 'A session plus recovery_codes' }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+        '429': { $ref: '#/components/responses/Error' }
+  /v1/users/me/mfa/reset:
+    post:
+      summary: Remove the authenticator so a new one can be enrolled
+      description: Needs the password and a current or recovery code. Revokes all sessions and answers an enrollment session.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [password, code]
+              properties:
+                password: { type: string }
+                code: { type: string }
+      responses:
+        '200': { $ref: '#/components/responses/Session' }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
   /v1/auth/login:
     post:
       security: []
@@ -109,49 +179,27 @@ paths:
                 properties:
                   email_recovery: { type: boolean }
                   sms_recovery: { type: boolean }
+                  signup: { type: boolean }
   /v1/auth/password-reset/request:
     post:
       security: []
-      summary: Send a password reset code
+      summary: Send a password reset link
       description: |
-        Sends a 6-digit code (valid 15 minutes, 5 guesses) to the account's
-        *verified* email or phone. Always answers 202, whether or not the
-        account exists, has that contact, or is rate limited (1 code per
-        minute, 5 per hour), so it can't be used to probe accounts.
-        403 `feature_disabled` if the channel isn't enabled.
+        Sends a link (valid 30 minutes) to the account's verified email or
+        phone; the new password is chosen on the account page. A reset never
+        removes MFA. Always answers 202, whether or not the account exists or
+        is rate limited, so it can't be used to probe accounts.
       requestBody:
         required: true
         content:
           application/json:
             schema:
               type: object
-              required: [username, channel]
+              required: [identifier]
               properties:
-                username: { type: string }
-                channel: { type: string, enum: [email, sms] }
+                identifier: { type: string, description: 'Username, email or phone' }
       responses:
         '202': { description: Accepted }
-        '400': { $ref: '#/components/responses/Error' }
-        '403': { $ref: '#/components/responses/Error' }
-  /v1/auth/password-reset/confirm:
-    post:
-      security: []
-      summary: Set a new password with a reset code
-      description: Signs the account out everywhere and clears any login lockout. A weak new password (400 weak_password) leaves the code usable.
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              required: [username, code, new_password]
-              properties:
-                username: { type: string }
-                code: { type: string }
-                new_password: { type: string }
-      responses:
-        '204': { description: Password changed }
-        '400': { $ref: '#/components/responses/Error' }
         '403': { $ref: '#/components/responses/Error' }
 
   /v1/users/me/password:

@@ -12,6 +12,7 @@ export function accountView(
   server: string | null,
   onUser: (u: User) => void,
   onSignedOut: (message: string) => void,
+  onMfaReset: (u: User) => void,
 ): HTMLElement {
   let user = initialUser;
   let features: Features | null = null;
@@ -21,7 +22,7 @@ export function accountView(
     "div",
     { class: "main" },
     h("header", { class: "main-header" }, h("h1", { text: "Account" })),
-    h("section", { class: "content settings" }, profileSection(), passwordSection(), recovery, backgroundSection()),
+    h("section", { class: "content settings" }, profileSection(), passwordSection(), mfaSection(), recovery, backgroundSection()),
   );
 
   function setUser(u: User) {
@@ -113,6 +114,54 @@ export function accountView(
       }
     });
     return form;
+  }
+
+  function mfaSection() {
+    const panel = h("div", { class: "contact-panel" });
+    const start = h("button", {
+      class: "btn btn-sm btn-ghost",
+      text: "Replace authenticator",
+      on: {
+        click: () => {
+          const password = input("mfa_pw", "Current password", "", "", "password");
+          password.input.autocomplete = "current-password";
+          const code = input("mfa_current", "Authenticator or recovery code", "", "");
+          code.input.autocomplete = "one-time-code";
+          const error = h("p", { class: "form-error", attrs: { role: "alert" } });
+          const go = h("button", { class: "btn btn-primary btn-sm", attrs: { type: "submit" }, text: "Continue" });
+          const form = h(
+            "form",
+            { class: "inline-form" },
+            h("p", { class: "hint", text: "This signs out all your devices and invalidates your recovery codes. You'll set up a new authenticator right away." }),
+            password.field,
+            code.field,
+            error,
+            h("div", { class: "form-actions" }, cancelBtn(panel), go),
+          );
+          form.addEventListener("submit", async (e) => {
+            e.preventDefault();
+            error.textContent = "";
+            go.disabled = true;
+            try {
+              onMfaReset(await api.mfaReset(password.input.value, code.input.value));
+            } catch (err) {
+              fail(err, error);
+              go.disabled = false;
+            }
+          });
+          panel.replaceChildren(form);
+          password.input.focus();
+        },
+      },
+    });
+    return h(
+      "section",
+      { class: "settings-section" },
+      h("h2", { text: "Two-factor authentication" }),
+      h("p", { class: "hint", text: "Your account is protected by an authenticator app." }),
+      h("div", { class: "form-actions" }, start),
+      panel,
+    );
   }
 
   function renderRecovery() {
@@ -281,7 +330,7 @@ export function accountView(
     api
       .serverFeatures(server)
       .then((f) => (features = f))
-      .catch(() => (features = { email_recovery: false, sms_recovery: false }))
+      .catch(() => (features = { email_recovery: false, sms_recovery: false, signup: false }))
       .finally(renderRecovery);
   }
   api.fetchMe().then(setUser).catch(() => {});

@@ -12,16 +12,28 @@ export interface User {
   email_verified: boolean;
   phone: string;
   phone_verified: boolean;
+  mfa_enabled: boolean;
 }
 
 /** Optional recovery flows the server has enabled. */
 export interface Features {
   email_recovery: boolean;
   sms_recovery: boolean;
+  signup: boolean;
 }
 
 export type ContactKind = "email" | "phone";
-export type ResetChannel = "email" | "sms";
+
+export interface LoginOutcome {
+  user: User | null;
+  mfa_required: boolean;
+}
+
+export interface MfaSetup {
+  secret: string;
+  qr: boolean[];
+  size: number;
+}
 
 export interface UserRef {
   id: string;
@@ -82,7 +94,7 @@ export interface RealtimeEvent {
   data: any;
 }
 
-export type RealtimeState = "connecting" | "connected" | "disconnected" | "signed_out";
+export type RealtimeState = "connecting" | "connected" | "disconnected" | "signed_out" | "mfa_required";
 
 export function onRealtimeEvent(fn: (e: RealtimeEvent) => void): Promise<UnlistenFn> {
   return listen<RealtimeEvent>("realtime-event", (e) => fn(e.payload));
@@ -196,17 +208,20 @@ export const api = {
   savedServer: () => invoke<string | null>("saved_server"),
   savedLogin: () => invoke<SavedLogin>("saved_login"),
   restoreSession: () => invoke<User | null>("restore_session"),
-  register: (server: string, username: string, password: string, displayName: string, email: string, phone: string, staySignedIn: boolean) =>
-    invoke<User>("register", { server, username, password, displayName, email: email || null, phone: phone || null, staySignedIn }),
+  signup: (server: string, username: string, displayName: string, email: string, phone: string) =>
+    invoke<void>("signup", { server, username, displayName, email: email || null, phone: phone || null }),
   login: (server: string, username: string, password: string, staySignedIn: boolean) =>
-    invoke<User>("login", { server, username, password, staySignedIn }),
+    invoke<LoginOutcome>("login", { server, username, password, staySignedIn }),
+  mfaLogin: (code: string, staySignedIn: boolean) => invoke<User>("mfa_login", { code, staySignedIn }),
+  mfaEnrollStart: () => invoke<MfaSetup>("mfa_enroll_start"),
+  mfaEnrollConfirm: (code: string) => invoke<{ user: User; recovery_codes: string[] }>("mfa_enroll_confirm", { code }),
+  mfaReset: (password: string, code: string) => invoke<User>("mfa_reset", { password, code }),
+  currentUser: () => invoke<User | null>("current_user"),
   logout: () => invoke<void>("logout"),
 
   serverFeatures: (server: string) => invoke<Features>("server_features", { server }),
-  requestPasswordReset: (server: string, username: string, channel: ResetChannel) =>
-    invoke<void>("request_password_reset", { server, username, channel }),
-  confirmPasswordReset: (server: string, username: string, code: string, newPassword: string) =>
-    invoke<void>("confirm_password_reset", { server, username, code, newPassword }),
+  requestPasswordReset: (server: string, identifier: string) =>
+    invoke<void>("request_password_reset", { server, identifier }),
   fetchMe: () => invoke<User>("fetch_me"),
   changePassword: (currentPassword: string, newPassword: string) =>
     invoke<User>("change_password", { currentPassword, newPassword }),

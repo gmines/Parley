@@ -40,6 +40,10 @@ jobs:
           helm template parley deploy/helm/parley -f deploy/helm/parley/ci-values.yaml \
             --set postgres.enabled=false --set externalDatabase.existingSecret=pg \
             --set nats.enabled=false --set externalNats.url=nats://nats.example:4222 > /dev/null
+          # The public account page, with its Cloudflare origin lock.
+          helm template parley deploy/helm/parley -f deploy/helm/parley/ci-values.yaml \
+            --set accountWeb.enabled=true --set accountWeb.host=account.example.org \
+            --set accountWeb.originPull.enabled=true --set accountWeb.originPull.caSecret=cf-ca > /dev/null
 
   image:
     if: github.event_name != 'pull_request'
@@ -51,6 +55,9 @@ jobs:
           - name: api
             context: .
             file: services/api/Dockerfile
+          - name: account-web
+            context: .
+            file: services/account-web/Dockerfile
           - name: realtime
             context: .
             file: services/realtime/Dockerfile

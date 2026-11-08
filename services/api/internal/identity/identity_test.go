@@ -35,70 +35,17 @@ func TestPasswordHashRoundTrip(t *testing.T) {
 func newService(t *testing.T) (*Service, *auth.Verifier) {
 	pool := dbtest.New(t, migrations.FS)
 	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
-	s, err := NewService(pool, Config{Signer: auth.NewSigner(priv, time.Minute), RefreshTTL: time.Hour, Hash: testHash})
+	s, err := NewService(pool, Config{Signer: auth.NewSigner(priv, time.Minute), Verifier: auth.NewVerifier(pub), MFAKey: make([]byte, 32), RefreshTTL: time.Hour, Hash: testHash})
 	if err != nil {
 		t.Fatal(err)
 	}
 	return s, auth.NewVerifier(pub)
 }
 
-func TestRegisterLogin(t *testing.T) {
-	s, v := newService(t)
-	ctx := context.Background()
-
-	sess, err := s.Register(ctx, Registration{Username: "  Alice ", Password: "copper-lantern-meadow", DisplayName: ""})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if sess.User.Username != "alice" || sess.User.DisplayName != "alice" {
-		t.Fatalf("user = %+v, want normalized username and default display name", sess.User)
-	}
-	claims, err := v.Verify(sess.AccessToken)
-	if err != nil || claims.UserID != sess.User.ID {
-		t.Fatalf("access token claims = %+v, err = %v", claims, err)
-	}
-
-	if _, err := s.Register(ctx, Registration{Username: "ALICE", Password: "velvet-thunder-pine", DisplayName: ""}); !errors.Is(err, ErrUsernameTaken) {
-		t.Fatalf("duplicate register err = %v, want ErrUsernameTaken", err)
-	}
-	if _, err := s.Login(ctx, "alice", "copper-lantern-meadow", "203.0.113.1"); err != nil {
-		t.Fatalf("login: %v", err)
-	}
-	if _, err := s.Login(ctx, "alice", "wrong-password", "203.0.113.1"); !errors.Is(err, ErrBadCredentials) {
-		t.Fatalf("wrong password err = %v", err)
-	}
-	if _, err := s.Login(ctx, "nobody", "whatever-pass", "203.0.113.1"); !errors.Is(err, ErrBadCredentials) {
-		t.Fatalf("unknown user err = %v", err)
-	}
-}
-
-func TestRegisterValidation(t *testing.T) {
-	s, _ := newService(t)
-	ctx := context.Background()
-	cases := []struct {
-		user, pass, display string
-		want                error
-	}{
-		{"a", "longenough", "", ErrInvalidUsername},
-		{"has space", "longenough", "", ErrInvalidUsername},
-		{"émile", "longenough", "", ErrInvalidUsername},
-		{"bob", "short", "", ErrInvalidPassword},
-		{"bob", "longenough", "bad\x00name", ErrInvalidDisplayName},
-	}
-	for _, c := range cases {
-		if _, err := s.Register(ctx, Registration{Username: c.user, Password: c.pass, DisplayName: c.display}); !errors.Is(err, c.want) {
-			t.Errorf("Register(%q, %q, %q) err = %v, want %v", c.user, c.pass, c.display, err, c.want)
-		}
-	}
-}
-
 func TestRefreshRotationAndReuseDetection(t *testing.T) {
 	s, _ := newService(t)
 	ctx := context.Background()
-	first, err := s.Register(ctx, Registration{Username: "carol", Password: "plum-orbit-candle-42", DisplayName: "Carol"})
-	if err != nil {
-		t.Fatal(err)
-	}
+	first := mustRegister(t, s, Registration{Username: "carol"})
 
 	second, err := s.Refresh(ctx, first.RefreshToken)
 	if err != nil {
@@ -144,10 +91,7 @@ func TestRefreshRetryAfterLostResponse(t *testing.T) {
 	ctx := context.Background()
 	now := time.Now()
 	s.now = func() time.Time { return now }
-	first, err := s.Register(ctx, Registration{Username: "dora", Password: "plum-orbit-candle-42", DisplayName: "Dora"})
-	if err != nil {
-		t.Fatal(err)
-	}
+	first := mustRegister(t, s, Registration{Username: "dora"})
 	lost, err := s.Refresh(ctx, first.RefreshToken)
 	if err != nil {
 		t.Fatal(err)

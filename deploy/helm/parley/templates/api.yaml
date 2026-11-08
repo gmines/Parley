@@ -43,6 +43,16 @@ spec:
             - name: PARLEY_SIGNING_KEY
               valueFrom:
                 secretKeyRef: { name: {{ include "parley.secretName" . }}, key: signing-key }
+            - name: PARLEY_MFA_KEY
+              valueFrom:
+                secretKeyRef: { name: {{ include "parley.secretName" . }}, key: mfa-key }
+            {{- if .Values.accountWeb.enabled }}
+            # Serves only the account page; see account-web.yaml.
+            - name: PARLEY_INTERNAL_LISTEN_ADDR
+              value: ":8081"
+            - name: PARLEY_ACCOUNT_PUBLIC_URL
+              value: {{ printf "https://%s" .Values.accountWeb.host | quote }}
+            {{- end }}
             - name: PARLEY_NATS_URL
               value: {{ include "parley.natsUrl" . | quote }}
             - name: PARLEY_ACCESS_TTL
@@ -61,6 +71,9 @@ spec:
             {{- end }}
           ports:
             - { name: http, containerPort: 8080 }
+            {{- if .Values.accountWeb.enabled }}
+            - { name: internal, containerPort: 8081 }
+            {{- end }}
           readinessProbe:
             httpGet: { path: /readyz, port: http }
             periodSeconds: 10
@@ -83,3 +96,6 @@ spec:
     {{- include "parley.selector" (list . "api") | nindent 4 }}
   ports:
     - { name: http, port: 8080, targetPort: http }
+    {{- if .Values.accountWeb.enabled }}
+    - { name: internal, port: 8081, targetPort: internal }
+    {{- end }}

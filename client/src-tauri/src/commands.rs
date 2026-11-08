@@ -10,7 +10,7 @@ use crate::api::{Blocked, BlockedList, Features, Friend, FriendsList, Requests, 
 use crate::config::ConfigStore;
 use crate::error::{AppError, Result};
 use crate::realtime::Realtime;
-use crate::session::{normalize_server, Registration, SessionManager};
+use crate::session::{normalize_server, SessionManager};
 
 pub struct AppState {
     pub session: SessionManager,
@@ -54,31 +54,27 @@ pub async fn restore_session(state: State<'_, AppState>) -> Result<Option<User>>
     state.session.restore(&normalize_server(&server)?).await
 }
 
+/// Requests a new account; the server sends an activation link.
 #[tauri::command]
-#[allow(clippy::too_many_arguments)]
-pub async fn register(
+pub async fn signup(
     state: State<'_, AppState>,
     server: String,
     username: String,
-    password: String,
     display_name: String,
     email: Option<String>,
     phone: Option<String>,
-    stay_signed_in: Option<bool>,
-) -> Result<User> {
+) -> Result<()> {
     let server = normalize_server(&server)?;
-    let stay = stay_signed_in.unwrap_or(true);
-    state.session.set_persist(stay);
-    let reg = Registration {
-        username: &username,
-        password: &password,
-        display_name: &display_name,
-        email: email.as_deref().unwrap_or(""),
-        phone: phone.as_deref().unwrap_or(""),
-    };
-    let user = state.session.register(&server, &reg).await?;
-    remember_login(&state, &server, &user, stay);
-    Ok(user)
+    let body = json!({ "username": username, "display_name": display_name, "email": email, "phone": phone });
+    state.session.public_post(&server, "v1/auth/signup", &body).await?;
+    state.config.update(|c| c.server_url = Some(server.to_string()));
+    Ok(())
+}
+
+#[derive(Serialize)]
+pub struct LoginOutcome {
+    user: Option<User>,
+    mfa_required: bool,
 }
 
 #[tauri::command]
@@ -88,13 +84,59 @@ pub async fn login(
     username: String,
     password: String,
     stay_signed_in: Option<bool>,
-) -> Result<User> {
+) -> Result<LoginOutcome> {
     let server = normalize_server(&server)?;
     let stay = stay_signed_in.unwrap_or(true);
     state.session.set_persist(stay);
     let user = state.session.login(&server, &username, &password).await?;
-    remember_login(&state, &server, &user, stay);
+    if let Some(u) = &user {
+        remember_login(&state, &server, u, stay);
+    }
+    Ok(LoginOutcome { mfa_required: user.is_none(), user })
+}
+
+/// The second step of a login: an authenticator or recovery code.
+#[tauri::command]
+pub async fn mfa_login(state: State<'_, AppState>, code: String, stay_signed_in: Option<bool>) -> Result<User> {
+    let (server, user) = state.session.mfa_login(&code).await?;
+    remember_login(&state, &server, &user, stay_signed_in.unwrap_or(true));
     Ok(user)
+}
+
+#[derive(Serialize)]
+pub struct MfaSetup {
+    secret: String,
+    /// QR code as rows of `size` modules, dark = true.
+    qr: Vec<bool>,
+    size: usize,
+}
+
+#[tauri::command]
+pub async fn mfa_enroll_start(state: State<'_, AppState>) -> Result<MfaSetup> {
+    let s = state.session.mfa_enroll_start().await?;
+    let code = qrcode::QrCode::new(s.otpauth_uri.as_bytes()).map_err(|e| AppError::Internal(e.to_string()))?;
+    Ok(MfaSetup {
+        secret: s.secret,
+        size: code.width(),
+        qr: code.to_colors().into_iter().map(|c| c == qrcode::Color::Dark).collect(),
+    })
+}
+
+#[derive(Serialize)]
+pub struct MfaConfirmed {
+    user: User,
+    recovery_codes: Vec<String>,
+}
+
+#[tauri::command]
+pub async fn mfa_enroll_confirm(state: State<'_, AppState>, code: String) -> Result<MfaConfirmed> {
+    let (user, recovery_codes) = state.session.mfa_enroll_confirm(&code).await?;
+    Ok(MfaConfirmed { user, recovery_codes })
+}
+
+#[tauri::command]
+pub async fn mfa_reset(state: State<'_, AppState>, password: String, code: String) -> Result<User> {
+    state.session.mfa_reset(&password, &code).await
 }
 
 fn remember_login(state: &AppState, server: &Url, user: &User, stay: bool) {
@@ -134,39 +176,19 @@ pub async fn server_features(state: State<'_, AppState>, server: String) -> Resu
         .await
 }
 
-/// `channel` is "email" or "sms".
+/// `identifier` is a username, email address or phone number.
 #[tauri::command]
 pub async fn request_password_reset(
     state: State<'_, AppState>,
     server: String,
-    username: String,
-    channel: String,
+    identifier: String,
 ) -> Result<()> {
-    let body = json!({ "username": username, "channel": channel });
+    let body = json!({ "identifier": identifier });
     state
         .session
         .public_post(
             &normalize_server(&server)?,
             "v1/auth/password-reset/request",
-            &body,
-        )
-        .await
-}
-
-#[tauri::command]
-pub async fn confirm_password_reset(
-    state: State<'_, AppState>,
-    server: String,
-    username: String,
-    code: String,
-    new_password: String,
-) -> Result<()> {
-    let body = json!({ "username": username, "code": code, "new_password": new_password });
-    state
-        .session
-        .public_post(
-            &normalize_server(&server)?,
-            "v1/auth/password-reset/confirm",
             &body,
         )
         .await

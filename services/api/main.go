@@ -5,7 +5,10 @@
 //	PARLEY_DATABASE_URL   Postgres URL (required)
 //	PARLEY_SIGNING_KEY    base64 32-byte Ed25519 seed for access tokens (required;
 //	                      `api keygen` prints a new one with its PARLEY_VERIFY_KEY)
+//	PARLEY_MFA_KEY        base64 32-byte key sealing TOTP secrets (required)
 //	PARLEY_LISTEN_ADDR    default ":8080"
+//	PARLEY_INTERNAL_LISTEN_ADDR  serves the account page's API on this address,
+//	                      which must not be exposed publicly; empty = off
 //	PARLEY_ACCESS_TTL     default "15m"
 //	PARLEY_REFRESH_TTL    default "720h"
 //	PARLEY_NATS_URL       NATS server for realtime events, e.g. "nats://localhost:4222".
@@ -57,15 +60,55 @@ func main() {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
 		}
-		fmt.Printf("PARLEY_SIGNING_KEY=%s\nPARLEY_VERIFY_KEY=%s\n",
-			base64.StdEncoding.EncodeToString(priv.Seed()), auth.EncodePublicKey(pub))
+		mfa := make([]byte, 32)
+		if _, err := rand.Read(mfa); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		fmt.Printf("PARLEY_SIGNING_KEY=%s\nPARLEY_VERIFY_KEY=%s\nPARLEY_MFA_KEY=%s\n",
+			base64.StdEncoding.EncodeToString(priv.Seed()), auth.EncodePublicKey(pub), base64.StdEncoding.EncodeToString(mfa))
 		return
 	}
 	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, nil)))
+	// `api mfa-reset <username>`: for someone who lost their authenticator and
+	// recovery codes. Needs the same environment as the server.
+	if len(os.Args) == 3 && os.Args[1] == "mfa-reset" {
+		if err := adminResetMFA(os.Args[2]); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		fmt.Println("MFA cleared; the user must set it up again at next login.")
+		return
+	}
 	if err := run(); err != nil {
 		slog.Error("api exited", "err", err)
 		os.Exit(1)
 	}
+}
+
+func adminResetMFA(username string) error {
+	ctx := context.Background()
+	key, err := auth.ParsePrivateKey(os.Getenv("PARLEY_SIGNING_KEY"))
+	if err != nil {
+		return fmt.Errorf("PARLEY_SIGNING_KEY: %w", err)
+	}
+	mfa, err := mfaKey()
+	if err != nil {
+		return err
+	}
+	pool, err := db.Connect(ctx, os.Getenv("PARLEY_DATABASE_URL"))
+	if err != nil {
+		return err
+	}
+	defer pool.Close()
+	ident, err := identity.NewService(pool, identity.Config{
+		Signer: auth.NewSigner(key, time.Minute), Verifier: auth.NewVerifier(key.Public().(ed25519.PublicKey)),
+		MFAKey: mfa, Hash: identity.DefaultHashParams,
+	})
+	if err != nil {
+		return err
+	}
+	return ident.AdminResetMFA(ctx, username)
 }
 
 func run() error {
@@ -88,7 +131,12 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	mfa, err := mfaKey()
+	if err != nil {
+		return err
+	}
 	addr := envOr("PARLEY_LISTEN_ADDR", ":8080")
+	internalAddr := os.Getenv("PARLEY_INTERNAL_LISTEN_ADDR")
 	lockout, err := lockoutConfig()
 	if err != nil {
 		return err
@@ -113,6 +161,8 @@ func run() error {
 
 	ident, err := identity.NewService(pool, identity.Config{
 		Signer:     auth.NewSigner(key, accessTTL),
+		Verifier:   auth.NewVerifier(key.Public().(ed25519.PublicKey)),
+		MFAKey:     mfa,
 		RefreshTTL: refreshTTL,
 		Hash:       identity.DefaultHashParams,
 		Lockout:    lockout,
@@ -167,8 +217,27 @@ func run() error {
 	}
 	b := buildinfo.Get()
 	slog.Info("api listening", "addr", ln.Addr().String(), "version", b.Version, "commit", b.Commit, "modified", b.Modified)
-	errc := make(chan error, 1)
+	errc := make(chan error, 2)
 	go func() { errc <- httpSrv.Serve(ln) }()
+
+	var internalSrv *http.Server
+	if internalAddr != "" {
+		internalSrv = &http.Server{
+			Addr:              internalAddr,
+			Handler:           srv.InternalHandler(),
+			ReadHeaderTimeout: 5 * time.Second,
+			ReadTimeout:       10 * time.Second,
+			WriteTimeout:      30 * time.Second,
+			IdleTimeout:       60 * time.Second,
+			MaxHeaderBytes:    8 << 10,
+		}
+		iln, err := net.Listen("tcp", internalAddr)
+		if err != nil {
+			return err
+		}
+		slog.Info("internal api listening", "addr", iln.Addr().String())
+		go func() { errc <- internalSrv.Serve(iln) }()
+	}
 
 	select {
 	case err := <-errc:
@@ -177,5 +246,8 @@ func run() error {
 	}
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
+	if internalSrv != nil {
+		_ = internalSrv.Shutdown(shutdownCtx)
+	}
 	return httpSrv.Shutdown(shutdownCtx)
 }

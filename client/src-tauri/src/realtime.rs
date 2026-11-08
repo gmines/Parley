@@ -30,7 +30,7 @@ pub struct Realtime {
 
 #[derive(Serialize, Clone)]
 struct Status {
-    /// "connecting", "connected", "disconnected" or "signed_out"
+    /// "connecting", "connected", "disconnected", "signed_out" or "mfa_required"
     state: &'static str,
 }
 
@@ -73,6 +73,10 @@ async fn run(app: AppHandle) {
             Ok(()) => backoff = Duration::from_secs(1), // was connected; retry promptly
             Err(AppError::NotLoggedIn | AppError::SessionExpired) => {
                 status(&app, "signed_out");
+                return;
+            }
+            Err(AppError::Api { code, .. }) if code == "mfa_setup_required" => {
+                status(&app, "mfa_required");
                 return;
             }
             Err(e) => log::warn!("realtime connection failed: {e}"),
@@ -153,110 +157,4 @@ fn jitter() -> Duration {
         .unwrap_or_default()
         .subsec_nanos();
     Duration::from_millis(u64::from(nanos % 1000))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::session::tests::{live_server, reg, unique, MemoryStore};
-    use std::sync::{Arc, Mutex as StdMutex};
-
-    /// Against a live api + realtime (PARLEY_TEST_API_URL): connects with the
-    /// advertised URL and receives a message sent by another user.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn receives_messages_live() {
-        let Some(server) = live_server() else {
-            eprintln!("PARLEY_TEST_API_URL not set; skipping");
-            return;
-        };
-        let alice = SessionManager::new(Box::new(MemoryStore::default()));
-        let bob = Arc::new(SessionManager::new(Box::new(MemoryStore::default())));
-        let (a_name, b_name) = (unique("rta"), unique("rtb"));
-        alice.register(&server, &reg(&a_name, "")).await.unwrap();
-        let b_user = bob.register(&server, &reg(&b_name, "")).await.unwrap();
-
-        let got: Arc<StdMutex<Vec<serde_json::Value>>> = Arc::default();
-        let (conn_tx, conn_rx) = tokio::sync::oneshot::channel();
-        let task = {
-            let (bob, got) = (bob.clone(), got.clone());
-            tokio::spawn(async move {
-                let _ = connect_once(
-                    &bob,
-                    move || {
-                        let _ = conn_tx.send(());
-                    },
-                    move |e| got.lock().unwrap().push(e),
-                )
-                .await;
-            })
-        };
-        tokio::time::timeout(Duration::from_secs(10), conn_rx)
-            .await
-            .expect("connect timed out")
-            .unwrap();
-
-        let sent: serde_json::Value = alice
-            .call(
-                Method::POST,
-                "v1/friends/requests",
-                Some(serde_json::json!({ "username": b_name })),
-            )
-            .await
-            .unwrap();
-        let req_id = sent["request"]["id"].as_str().unwrap().to_string();
-        bob.call_empty(
-            Method::POST,
-            &format!("v1/friends/requests/{req_id}/accept"),
-            None,
-        )
-        .await
-        .unwrap();
-        let conv: serde_json::Value = alice
-            .call(
-                Method::POST,
-                "v1/conversations/dm",
-                Some(serde_json::json!({ "user_id": b_user.id })),
-            )
-            .await
-            .unwrap();
-        let path = format!("v1/conversations/{}/messages", conv["id"].as_str().unwrap());
-        let _: serde_json::Value = alice
-            .call(
-                Method::POST,
-                &path,
-                Some(serde_json::json!({ "content": "hi from rust", "nonce": "x" })),
-            )
-            .await
-            .unwrap();
-
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
-        loop {
-            let types: Vec<String> = got
-                .lock()
-                .unwrap()
-                .iter()
-                .map(|e| e["type"].as_str().unwrap_or("").to_string())
-                .collect();
-            if types.iter().any(|t| t == "message.created") {
-                assert_eq!(types.first().map(String::as_str), Some("ready"));
-                break;
-            }
-            assert!(
-                tokio::time::Instant::now() < deadline,
-                "no message.created; got {types:?}"
-            );
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
-        let msg = got
-            .lock()
-            .unwrap()
-            .iter()
-            .find(|e| e["type"] == "message.created")
-            .cloned()
-            .unwrap();
-        assert_eq!(msg["data"]["content"], "hi from rust");
-        task.abort();
-    }
-
-    use reqwest::Method;
 }

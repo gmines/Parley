@@ -216,3 +216,33 @@ while people update, set `voice.sip.plain.enabled: true` and open TCP+UDP
 
 - TURN relay for networks that block UDP.
 - More than one media node (rooms would be assigned to nodes).
+
+## Sign-up, password reset and MFA
+
+New accounts are created from a link sent by email or SMS, and every account
+must set up an authenticator app. Three things are needed:
+
+1. **Delivery.** Under `api.extraEnv` set `PARLEY_RECOVERY_EMAIL: smtp` and the
+   `PARLEY_SMTP_*` settings (see `services/api/config.go`).
+2. **The account page.** Set `accountWeb.enabled: true` and `accountWeb.host`
+   to its own hostname. It cannot share `host`, which must stay DNS-only for SIP.
+3. **Back up `mfa-key`** from the release's Secret. Without it nobody's
+   authenticator can be read.
+
+**Upgrade order:** release the client first. Older clients can't enroll, so they
+stop working as soon as the server is upgraded.
+
+### Cloudflare in front of the account page
+
+1. Proxy (orange cloud) `accountWeb.host` only. SSL/TLS mode: Full (strict).
+2. Add a WAF rate-limit rule on `/account/api/`, e.g. 20 requests per minute per IP.
+3. Lock the origin, because the server's IP is public anyway for SIP. Turn on
+   Authenticated Origin Pulls, store Cloudflare's origin-pull CA in a Secret
+   (`kubectl create secret generic cf-origin-ca --from-file=ca.crt=...`), then set
+   `accountWeb.originPull.enabled: true` and `caSecret: cf-origin-ca`.
+
+### Locked-out users
+
+For someone who lost both their authenticator and recovery codes:
+
+    kubectl exec deploy/<release>-api -- /api mfa-reset <username>

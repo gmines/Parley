@@ -2,7 +2,7 @@ CONTAINER ?= podman
 TEST_PG    := parley-test-pg
 TEST_DB    := postgres://postgres:parley@localhost:55432/parley?sslmode=disable
 
-.PHONY: build test test-unit test-db test-db-stop dev-nats lint image-api image-realtime image-voice-control image-freeswitch image-kamailio image-pjsua run-api
+.PHONY: build test test-unit test-db test-db-stop dev-nats lint image-api image-account-web image-realtime image-voice-control image-freeswitch image-kamailio image-pjsua run-api
 
 build:
 	go build ./...
@@ -36,6 +36,9 @@ test-db-stop:
 image-api:
 	$(CONTAINER) build -f services/api/Dockerfile -t parley/api:dev .
 
+image-account-web:
+	$(CONTAINER) build -f services/account-web/Dockerfile -t parley/account-web:dev .
+
 image-realtime:
 	$(CONTAINER) build -f services/realtime/Dockerfile -t parley/realtime:dev .
 
@@ -55,4 +58,4 @@ image-pjsua:
 
 # Runs the api locally against the test database with an ephemeral signing key.
 run-api: test-db
-	PARLEY_DATABASE_URL='$(TEST_DB)' PARLEY_SIGNING_KEY="$$(openssl rand -base64 32)" go run ./services/api
+	PARLEY_DATABASE_URL='$(TEST_DB)' PARLEY_SIGNING_KEY="$$(openssl rand -base64 32)" PARLEY_MFA_KEY="$$(openssl rand -base64 32)" go run ./services/api
