@@ -300,3 +300,98 @@ func (s *Service) notifyAt(ctx context.Context, channel, to, subject, body strin
 		s.deliver(ctx, pendingCode{channel: channelSMS, msg: delivery.Message{To: to, Subject: subject, Body: c.AppName + ": " + body}})
 	}
 }
+
+// NewUser is the account an admin asks AdminCreateUser to create.
+type NewUser struct {
+	Username    string
+	DisplayName string
+	Email       string
+}
+
+// CreatedUser is the result of AdminCreateUser: the new (inactive) account, the
+// activation link, when it expires, and whether a welcome email was sent.
+type CreatedUser struct {
+	User      User
+	URL       string
+	ExpiresAt time.Time
+	Emailed   bool
+}
+
+// AdminCreateUser creates an inactive account directly, bypassing the public
+// signup feature flag (the caller is a trusted operator). It issues an
+// activation link that lets the user choose a password; completing it verifies
+// the email and activates the account. The link is always returned so the admin
+// can hand it over, and is also emailed as a welcome message when email
+// delivery is on. Unlike public signup, duplicate username/email are reported
+// plainly, since there is no account-probing concern for an admin.
+func (s *Service) AdminCreateUser(ctx context.Context, in NewUser) (CreatedUser, error) {
+	if strings.TrimSpace(s.cfg().Recovery.AccountURL) == "" {
+		return CreatedUser{}, ErrNoAccountPage
+	}
+	username := NormalizeUsername(in.Username)
+	if !validUsername(username) {
+		return CreatedUser{}, ErrInvalidUsername
+	}
+	displayName := strings.TrimSpace(in.DisplayName)
+	if displayName == "" {
+		displayName = username
+	}
+	if !validDisplayName(displayName) {
+		return CreatedUser{}, ErrInvalidDisplayName
+	}
+	if strings.TrimSpace(in.Email) == "" {
+		return CreatedUser{}, ErrInvalidEmail
+	}
+	email, err := normalizeEmail(in.Email)
+	if err != nil {
+		return CreatedUser{}, err
+	}
+
+	ttl := s.cfg().Recovery.ActivationTTL
+	var (
+		u    User
+		url  string
+		link pendingCode
+	)
+	err = pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
+		var exists bool
+		if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM users WHERE username = $1)`, username).Scan(&exists); err != nil {
+			return err
+		}
+		if exists {
+			return ErrUsernameTaken
+		}
+		if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM users WHERE email = $1)`, email).Scan(&exists); err != nil {
+			return err
+		}
+		if exists {
+			return ErrContactInUse
+		}
+		err := tx.QueryRow(ctx, `INSERT INTO users (username, display_name, email) VALUES ($1, $2, $3)
+			RETURNING `+userCols("users"), username, displayName, email).Scan(userDest(&u)...)
+		if db.IsUniqueViolation(err, "users_username_key") {
+			return ErrUsernameTaken
+		}
+		if db.IsUniqueViolation(err, "") { // lost a race on the email
+			return ErrContactInUse
+		}
+		if err != nil {
+			return fmt.Errorf("create user: %w", err)
+		}
+		url, err = s.storeLink(ctx, tx, u, linkActivate, channelEmail, email, "admin", ttl)
+		if err != nil {
+			return err
+		}
+		link = pendingCode{channel: channelEmail, msg: s.linkMessage(u, linkActivate, channelEmail, email, url, ttl)}
+		return nil
+	})
+	if err != nil {
+		return CreatedUser{}, err
+	}
+	emailed := false
+	if s.cfg().Recovery.EmailEnabled {
+		s.deliver(ctx, link)
+		emailed = true
+	}
+	return CreatedUser{User: u, URL: url, ExpiresAt: s.now().Add(ttl), Emailed: emailed}, nil
+}

@@ -201,8 +201,11 @@ async function usersPage() {
   const search = h("input", { type: "search", placeholder: "Search username, name, email or phone", value: userQuery });
   const tbody = h("tbody");
   const pager = h("div", { class: "pager" });
+  const newUserPanel = h("div");
+  const newUserBtn = h("button", { class: "primary", text: "New user", onclick: () => toggleCreateForm() });
   const card = h("div", { class: "card" },
-    h("div", { class: "toolbar" }, search),
+    h("div", { class: "toolbar" }, search, newUserBtn),
+    newUserPanel,
     h("div", { class: "table-wrap" },
       h("table", {},
         h("thead", {}, h("tr", {}, ["User", "Email", "Phone", "MFA", "Status", "Last active"].map((t) => h("th", { text: t })))),
@@ -212,6 +215,56 @@ async function usersPage() {
     pager,
   );
   shell("#/users", h("h1", { text: "Users" }), card);
+
+  function toggleCreateForm() {
+    if (newUserPanel.firstChild) {
+      newUserPanel.replaceChildren();
+      newUserBtn.textContent = "New user";
+      return;
+    }
+    newUserBtn.textContent = "Cancel";
+    const username = textInput("", { autocomplete: "off", maxLength: 32, placeholder: "jsmith" });
+    const name = textInput("", { maxLength: 64, placeholder: "Jane Smith" });
+    const email = textInput("", { type: "email", autocomplete: "off", placeholder: "name@example.org" });
+    const err = h("p", { class: "error", role: "alert" });
+    const out = h("div");
+    const create = h("button", { class: "primary", type: "submit", text: "Create user" });
+    const form = h("form", { class: "subform" },
+      field("Username", username, "Lowercase a–z, 0–9, '_' or '.'; 2–32 characters. The user keeps this."),
+      field("Display name", name, "Optional; defaults to the username."),
+      field("Email", email, "The activation link is sent here if email delivery is on."),
+      err,
+      h("div", { class: "actions" }, create),
+      out,
+    );
+    form.addEventListener("submit", (e) => {
+      e.preventDefault();
+      busy(create, err, async () => {
+        const r = await api("POST", "/users", { username: username.value, display_name: name.value, email: email.value });
+        const box = h("input", { type: "text", readOnly: true, value: r.url });
+        const copy = h("button", {
+          type: "button", text: "Copy",
+          onclick: async () => { try { await navigator.clipboard.writeText(r.url); toast("Copied."); } catch { box.select(); } },
+        });
+        const sent = r.emailed
+          ? `A welcome email with this link was sent to ${email.value}. You can also hand the link over directly.`
+          : `Email delivery is off, so no message was sent. Give this link to @${r.user.username} privately.`;
+        out.replaceChildren(
+          h("div", { class: "notice ok" },
+            h("p", { text: `Created @${r.user.username}. ${sent}` }),
+            h("p", { class: "small", text: `It works once and expires ${fmtDate(r.expires_at)}. The user chooses a password and sets up MFA on first sign-in.` }),
+            h("div", { class: "linkbox" }, box, copy),
+          ),
+        );
+        username.value = name.value = email.value = "";
+        userOffset = 0;
+        load();
+        box.select();
+      });
+    });
+    newUserPanel.replaceChildren(form);
+    username.focus();
+  }
 
   async function load() {
     const data = await api("GET", `/users?q=${encodeURIComponent(userQuery)}&limit=${PAGE}&offset=${userOffset}`);

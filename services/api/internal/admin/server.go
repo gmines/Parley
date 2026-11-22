@@ -72,6 +72,7 @@ func (s *Server) Handler() http.Handler {
 	a("GET /api/audit", s.auditLog)
 
 	a("GET /api/users", s.listUsers)
+	a("POST /api/users", s.createUser)
 	a("GET /api/users/{id}", s.getUser)
 	a("PATCH /api/users/{id}", s.updateUser)
 	a("PUT /api/users/{id}/contact/{kind}", s.setContact)
@@ -205,6 +206,7 @@ func adminErr(err error) error {
 		return httpx.NewError(http.StatusTooManyRequests, "locked", err.Error())
 	}
 	for _, known := range []error{
+		identity.ErrInvalidUsername, identity.ErrUsernameTaken,
 		identity.ErrInvalidDisplayName, identity.ErrInvalidEmail, identity.ErrInvalidPhone, identity.ErrContactInUse,
 		identity.ErrFeatureDisabled, identity.ErrInvalidMFAPolicy, identity.ErrNoAccountPage, identity.ErrNoVerifiedContact,
 		identity.ErrNotActivated, identity.ErrAccountDisabled, identity.ErrInvalidChannel, identity.ErrTooManyCodes,
@@ -306,6 +308,33 @@ func (s *Server) listUsers(w http.ResponseWriter, r *http.Request, adm Admin) er
 		return err
 	}
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{"users": users, "total": total})
+	return nil
+}
+
+// createUser makes a new inactive account and returns its activation link. The
+// link is handed back for the admin to pass on, and emailed as a welcome
+// message when email delivery is on.
+func (s *Server) createUser(w http.ResponseWriter, r *http.Request, adm Admin) error {
+	var body struct {
+		Username    string `json:"username"`
+		DisplayName string `json:"display_name"`
+		Email       string `json:"email"`
+	}
+	if err := httpx.DecodeJSON(w, r, &body); err != nil {
+		return err
+	}
+	res, err := s.Identity.AdminCreateUser(r.Context(), identity.NewUser{
+		Username: body.Username, DisplayName: body.DisplayName, Email: body.Email,
+	})
+	if err != nil {
+		return adminErr(err)
+	}
+	// The link itself is a credential, so only the fact goes in the log.
+	s.Accounts.Audit(r.Context(), adm.Username, "user.create", res.User.Username,
+		map[string]any{"user_id": res.User.ID, "emailed": res.Emailed}, clientIP(r))
+	httpx.WriteJSON(w, http.StatusCreated, map[string]any{
+		"user": res.User, "url": res.URL, "expires_at": res.ExpiresAt, "emailed": res.Emailed,
+	})
 	return nil
 }
 

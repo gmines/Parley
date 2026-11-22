@@ -270,3 +270,77 @@ func TestSetRuntime(t *testing.T) {
 		t.Fatalf("lockout from runtime settings: %v", err)
 	}
 }
+
+func TestAdminCreateUser(t *testing.T) {
+	s, _, email, _ := linkService(t)
+	ctx := context.Background()
+
+	// Create an account; the welcome email carries the activation link.
+	res, err := s.AdminCreateUser(ctx, NewUser{Username: "  Ivy ", DisplayName: " Ivy Jones ", Email: "Ivy@Example.org"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.User.Username != "ivy" || res.User.DisplayName != "Ivy Jones" || !res.Emailed {
+		t.Fatalf("created %+v emailed=%v", res.User, res.Emailed)
+	}
+	if !strings.HasPrefix(res.URL, "https://account.example.org/account/set-password#t=") {
+		t.Fatalf("url %q", res.URL)
+	}
+	m, ok := email.Last("ivy@example.org")
+	if !ok || !strings.Contains(m.Body, res.URL) {
+		t.Fatalf("welcome email: %v %q", ok, m.Body)
+	}
+
+	// Can't sign in until activated; the link activates, verifies email, sets the password.
+	if _, err := s.Login(ctx, "ivy", strongPassword, ipA); !errors.Is(err, ErrBadCredentials) {
+		t.Fatalf("login before activation: %v", err)
+	}
+	if err := s.CompleteLink(ctx, linkRe.FindStringSubmatch(res.URL)[1], strongPassword); err != nil {
+		t.Fatalf("activate: %v", err)
+	}
+	if _, err := s.Login(ctx, "ivy", strongPassword, ipA); err != nil {
+		t.Fatalf("login after activation: %v", err)
+	}
+
+	// Duplicate username and duplicate email are reported plainly.
+	if _, err := s.AdminCreateUser(ctx, NewUser{Username: "ivy", Email: "other@example.org"}); !errors.Is(err, ErrUsernameTaken) {
+		t.Fatalf("dup username: %v", err)
+	}
+	if _, err := s.AdminCreateUser(ctx, NewUser{Username: "ivy2", Email: "ivy@example.org"}); !errors.Is(err, ErrContactInUse) {
+		t.Fatalf("dup email: %v", err)
+	}
+
+	// Bad input.
+	if _, err := s.AdminCreateUser(ctx, NewUser{Username: "x", Email: "a@example.org"}); !errors.Is(err, ErrInvalidUsername) {
+		t.Fatalf("bad username: %v", err)
+	}
+	if _, err := s.AdminCreateUser(ctx, NewUser{Username: "noemail", Email: ""}); !errors.Is(err, ErrInvalidEmail) {
+		t.Fatalf("missing email: %v", err)
+	}
+}
+
+func TestAdminCreateUserDeliveryOff(t *testing.T) {
+	s, _ := newServiceWith(t, func(c *Config) { c.Recovery.AccountURL = "https://account.example.org" })
+	ctx := context.Background()
+	// Email delivery is off: no message is sent, but the link comes back to hand over.
+	res, err := s.AdminCreateUser(ctx, NewUser{Username: "jack", Email: "jack@example.org"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Emailed {
+		t.Fatal("reported emailed with delivery off")
+	}
+	if err := s.CompleteLink(ctx, linkRe.FindStringSubmatch(res.URL)[1], strongPassword); err != nil {
+		t.Fatalf("activate handed-over link: %v", err)
+	}
+	if _, err := s.Login(ctx, "jack", strongPassword, ipA); err != nil {
+		t.Fatalf("login: %v", err)
+	}
+}
+
+func TestAdminCreateUserNeedsAccountPage(t *testing.T) {
+	s, _ := newServiceWith(t, nil)
+	if _, err := s.AdminCreateUser(context.Background(), NewUser{Username: "kim", Email: "kim@example.org"}); !errors.Is(err, ErrNoAccountPage) {
+		t.Fatalf("got %v", err)
+	}
+}
