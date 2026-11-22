@@ -8,6 +8,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"sync/atomic"
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
@@ -39,23 +40,31 @@ type jwtClaims struct {
 // Signer mints access tokens.
 type Signer struct {
 	key ed25519.PrivateKey
-	ttl time.Duration
+	ttl atomic.Int64 // time.Duration; adjustable while running
 	now func() time.Time
 }
 
 func NewSigner(key ed25519.PrivateKey, ttl time.Duration) *Signer {
-	return &Signer{key: key, ttl: ttl, now: time.Now}
+	s := &Signer{key: key, now: time.Now}
+	s.ttl.Store(int64(ttl))
+	return s
 }
+
+// TTL is the lifetime of access tokens issued from now on.
+func (s *Signer) TTL() time.Duration { return time.Duration(s.ttl.Load()) }
+
+// SetTTL changes the lifetime of tokens issued from now on.
+func (s *Signer) SetTTL(d time.Duration) { s.ttl.Store(int64(d)) }
 
 // Sign returns a signed access token and its expiry.
 func (s *Signer) Sign(c Claims) (string, time.Time, error) {
-	return s.sign(issuer, c, s.ttl)
+	return s.sign(issuer, c, s.TTL())
 }
 
 // SignEnrollment returns a token that can only be used to set up MFA. Accounts
-// without MFA get these instead of access tokens.
+// without MFA (where it's required) get these instead of access tokens.
 func (s *Signer) SignEnrollment(c Claims) (string, time.Time, error) {
-	return s.sign(enrollmentIssuer, c, s.ttl)
+	return s.sign(enrollmentIssuer, c, s.TTL())
 }
 
 // SignChallenge returns a token proving the password step of a login, to be

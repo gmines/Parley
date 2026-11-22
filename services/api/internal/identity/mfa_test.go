@@ -7,13 +7,14 @@ import (
 	"time"
 
 	"parley/services/api/internal/delivery"
+	"parley/services/api/internal/totp"
 )
 
 func TestTOTPVector(t *testing.T) {
 	// RFC 6238 appendix B, SHA-1, truncated to 6 digits.
 	secret := []byte("12345678901234567890")
 	for unix, want := range map[int64]string{59: "287082", 1111111109: "081804", 2000000000: "279037"} {
-		if got := totpAt(secret, unix/totpPeriod); got != want {
+		if got := totp.Code(secret, unix/totp.Period); got != want {
 			t.Errorf("t=%d got %s want %s", unix, got, want)
 		}
 	}
@@ -37,7 +38,7 @@ func enrollUser(t *testing.T, s *Service, sess Session) (string, Enrolled) {
 func TestExistingUserIsForcedToEnroll(t *testing.T) {
 	s, clock := newServiceWith(t, nil)
 	ctx := context.Background()
-	v := s.cfg.Verifier
+	v := s.cfg().Verifier
 	// Two devices signed in before MFA existed.
 	a := mustRegister(t, s, Registration{Username: "alice"})
 	b, err := s.Login(ctx, "alice", strongPassword, ipA)
@@ -97,7 +98,7 @@ func TestLoginRequiresSecondFactor(t *testing.T) {
 	s, clock := newServiceWith(t, withLockout(ScopeAccountIP))
 	ctx := context.Background()
 	secret, out := enrollUser(t, s, mustRegister(t, s, Registration{Username: "bob"}))
-	v := s.cfg.Verifier
+	v := s.cfg().Verifier
 
 	clock.advance(2 * time.Minute)
 	ch, err := s.Login(ctx, "bob", strongPassword, ipA)
@@ -191,7 +192,7 @@ func TestResetMFA(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.cfg.Verifier.VerifyEnrollment(sess.AccessToken); err != nil || sess.User.MFAEnabled {
+	if _, err := s.cfg().Verifier.VerifyEnrollment(sess.AccessToken); err != nil || sess.User.MFAEnabled {
 		t.Fatalf("after reset: %+v %v", sess.User, err)
 	}
 	if _, err := s.Refresh(ctx, out.RefreshToken); !errors.Is(err, ErrInvalidRefresh) {

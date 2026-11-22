@@ -13,6 +13,8 @@ export interface User {
   phone: string;
   phone_verified: boolean;
   mfa_enabled: boolean;
+  /** Must set up MFA before using the app (server policy). */
+  mfa_required: boolean;
 }
 
 /** Optional recovery flows the server has enabled. */

@@ -87,6 +87,7 @@ var (
 const (
 	channelEmail = "email"
 	channelSMS   = "sms"
+	channelAdmin = "admin" // a reset link an admin hands to the user directly
 
 	purposeVerifyEmail = "verify_email"
 	purposeVerifyPhone = "verify_phone"
@@ -100,16 +101,16 @@ type Features struct {
 }
 
 func (s *Service) Features() Features {
-	c := s.cfg.Recovery
+	c := s.cfg().Recovery
 	return Features{EmailRecovery: c.EmailEnabled, SMSRecovery: c.SMSEnabled, Signup: c.EmailEnabled || c.SMSEnabled}
 }
 
 func (s *Service) channelEnabled(channel string) (bool, error) {
 	switch channel {
 	case channelEmail:
-		return s.cfg.Recovery.EmailEnabled, nil
+		return s.cfg().Recovery.EmailEnabled, nil
 	case channelSMS:
-		return s.cfg.Recovery.SMSEnabled, nil
+		return s.cfg().Recovery.SMSEnabled, nil
 	}
 	return false, ErrInvalidChannel
 }
@@ -143,7 +144,7 @@ func normalizePhone(s string) (string, error) {
 func (s *Service) validateContacts(email, phone string) (string, string, error) {
 	var err error
 	if strings.TrimSpace(email) != "" {
-		if !s.cfg.Recovery.EmailEnabled {
+		if !s.cfg().Recovery.EmailEnabled {
 			return "", "", ErrFeatureDisabled
 		}
 		if email, err = normalizeEmail(email); err != nil {
@@ -151,7 +152,7 @@ func (s *Service) validateContacts(email, phone string) (string, string, error) 
 		}
 	}
 	if strings.TrimSpace(phone) != "" {
-		if !s.cfg.Recovery.SMSEnabled {
+		if !s.cfg().Recovery.SMSEnabled {
 			return "", "", ErrFeatureDisabled
 		}
 		if phone, err = normalizePhone(phone); err != nil {
@@ -299,7 +300,7 @@ type pendingCode struct {
 
 // checkCodeRate enforces the resend interval and hourly cap per user and purpose.
 func (s *Service) checkCodeRate(ctx context.Context, q db.Querier, userID uuid.UUID, purpose string) error {
-	c := s.cfg.Recovery
+	c := s.cfg().Recovery
 	now := s.now()
 	var (
 		lastHour int
@@ -333,7 +334,7 @@ func (s *Service) issueCode(ctx context.Context, tx pgx.Tx, u User, purpose, cha
 	if _, err := tx.Exec(ctx, `INSERT INTO one_time_codes
 		(id, user_id, purpose, channel, destination, code_hash, expires_at, created_at)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
-		id, u.ID, purpose, channel, dest, hashCode(id, code), now.Add(s.cfg.Recovery.CodeTTL), now); err != nil {
+		id, u.ID, purpose, channel, dest, hashCode(id, code), now.Add(s.cfg().Recovery.CodeTTL), now); err != nil {
 		return pendingCode{}, err
 	}
 	return pendingCode{channel: channel, msg: s.codeMessage(u, purpose, channel, dest, code)}, nil
@@ -358,7 +359,7 @@ func (s *Service) consumeCode(ctx context.Context, tx pgx.Tx, userID uuid.UUID, 
 	if err != nil {
 		return "", false, err
 	}
-	if attempts >= s.cfg.Recovery.MaxAttempts {
+	if attempts >= s.cfg().Recovery.MaxAttempts {
 		return "", false, nil
 	}
 	if subtle.ConstantTimeCompare(hashCode(id, strings.TrimSpace(code)), hash) != 1 {
@@ -375,7 +376,7 @@ func hashCode(id uuid.UUID, code string) []byte {
 }
 
 func (s *Service) codeMessage(u User, purpose, channel, dest, code string) delivery.Message {
-	app, mins := s.cfg.Recovery.AppName, int(s.cfg.Recovery.CodeTTL.Minutes())
+	app, mins := s.cfg().Recovery.AppName, int(s.cfg().Recovery.CodeTTL.Minutes())
 	subject := fmt.Sprintf("Confirm your %s %s", app, map[string]string{channelEmail: "email address", channelSMS: "phone number"}[channel])
 	body := fmt.Sprintf("Your %s verification code for @%s is %s. It expires in %d minutes.\n\n"+
 		"If you didn't add this address to a %s account, ignore this message.", app, u.Username, code, mins, app)
@@ -388,9 +389,9 @@ func (s *Service) codeMessage(u User, purpose, channel, dest, code string) deliv
 // deliver sends a code. By default this happens in the background so response
 // times don't reveal whether a message was sent.
 func (s *Service) deliver(ctx context.Context, c pendingCode) {
-	sender := s.cfg.Recovery.Email
+	sender := s.cfg().Recovery.Email
 	if c.channel == channelSMS {
-		sender = s.cfg.Recovery.SMS
+		sender = s.cfg().Recovery.SMS
 	}
 	send := func() {
 		ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), time.Minute)
@@ -399,7 +400,7 @@ func (s *Service) deliver(ctx context.Context, c pendingCode) {
 			slog.ErrorContext(ctx, "code delivery failed", "channel", c.channel, "err", err)
 		}
 	}
-	if s.cfg.Recovery.SynchronousDelivery {
+	if s.cfg().Recovery.SynchronousDelivery {
 		send()
 		return
 	}

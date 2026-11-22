@@ -71,7 +71,7 @@ func mustRegister(t *testing.T, s *Service, in Registration) Session {
 	if in.DisplayName == "" {
 		in.DisplayName = in.Username
 	}
-	hash, err := hashPassword(in.Password, s.cfg.Hash)
+	hash, err := hashPassword(in.Password, s.cfg().Hash)
 	if err != nil {
 		t.Fatal(err)
 	}

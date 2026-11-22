@@ -51,7 +51,7 @@ func (s *Server) Handler() http.Handler {
 	h("POST /v1/auth/password-reset/request", s.requestPasswordReset)
 	h("POST /v1/auth/mfa/login", s.mfaLogin)
 
-	// Accepts only enrollment tokens, and is all those tokens can reach.
+	// All an enrollment-only token can reach.
 	enroll := http.NewServeMux()
 	enroll.Handle("POST /v1/auth/mfa/enroll/start", httpx.Handler(s.mfaEnrollStart))
 	enroll.Handle("POST /v1/auth/mfa/enroll/confirm", httpx.Handler(s.mfaEnrollConfirm))
@@ -85,7 +85,15 @@ func (s *Server) Handler() http.Handler {
 	unauthorized := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, r, httpx.ErrUnauthorized)
 	})
-	mux.Handle("/v1/auth/mfa/enroll/", auth.MiddlewareFunc(s.Verifier.VerifyEnrollment, unauthorized)(enroll))
+	// Enrollment-only tokens (MFA required, not set up yet) and full ones
+	// (MFA optional for this account, and the user is opting in).
+	enrollOrFull := func(t string) (auth.Claims, error) {
+		if c, err := s.Verifier.VerifyEnrollment(t); err == nil {
+			return c, nil
+		}
+		return s.Verifier.Verify(t)
+	}
+	mux.Handle("/v1/auth/mfa/enroll/", auth.MiddlewareFunc(enrollOrFull, unauthorized)(enroll))
 	protected := auth.Middleware(s.Verifier, unauthorized)(authed)
 	mux.Handle("/v1/users/", protected)
 	mux.Handle("/v1/friends", protected)
@@ -158,6 +166,7 @@ func mapErr(err error) error {
 		identity.ErrBadCredentials:     {http.StatusUnauthorized, "bad_credentials"},
 		identity.ErrInvalidRefresh:     {http.StatusUnauthorized, "invalid_refresh_token"},
 		identity.ErrUserNotFound:       {http.StatusNotFound, "user_not_found"},
+		identity.ErrAccountDisabled:    {http.StatusForbidden, "account_disabled"},
 		identity.ErrFeatureDisabled:    {http.StatusForbidden, "feature_disabled"},
 		identity.ErrInvalidEmail:       {http.StatusBadRequest, "invalid_email"},
 		identity.ErrInvalidPhone:       {http.StatusBadRequest, "invalid_phone"},

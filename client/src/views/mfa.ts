@@ -17,13 +17,16 @@ function qrCanvas(setup: MfaSetup): HTMLCanvasElement {
 }
 
 /**
- * Mandatory authenticator setup: there's no way into the app past this screen
- * except finishing it (the server enforces that; this is only the UI for it).
+ * Authenticator setup. When the server requires MFA there's no way into the
+ * app past this screen except finishing it (the server enforces that; this is
+ * only the UI for it). With opts.optional, the user chose to turn it on and
+ * onLogout is "cancel" instead.
  */
-export function mfaSetupView(onDone: (u: User) => void, onLogout: () => void): HTMLElement {
+export function mfaSetupView(onDone: (u: User) => void, onLogout: () => void, opts: { optional?: boolean } = {}): HTMLElement {
   const card = h("div", { class: "auth-card" }, h("p", { class: "hint", text: "Preparing setup…" }));
   const brand = () => h("div", { class: "brand brand-lg", text: "Parley" });
-  const logout = () => h("div", { class: "auth-links" }, h("button", { class: "link", attrs: { type: "button" }, text: "Log out", on: { click: onLogout } }));
+  const logout = () =>
+    h("div", { class: "auth-links" }, h("button", { class: "link", attrs: { type: "button" }, text: opts.optional ? "Cancel" : "Log out", on: { click: onLogout } }));
 
   function showRecoveryCodes(user: User, codes: string[]) {
     const saved = h("input", { attrs: { type: "checkbox", id: "f-saved" } });
@@ -63,7 +66,11 @@ export function mfaSetupView(onDone: (u: User) => void, onLogout: () => void): H
       { class: "auth-card-body" },
       brand(),
       h("h1", { text: "Set up two-factor authentication" }),
-      h("p", { class: "hint", text: "Parley now requires this on every account. Scan the code with an authenticator app such as Aegis, Google Authenticator or 1Password." }),
+      h("p", {
+        class: "hint",
+        text: (opts.optional ? "Protect your account with a code from your phone at every sign-in. " : "Your server requires this for your account. ") +
+          "Scan the code with an authenticator app such as Google Authenticator, Aegis or 1Password.",
+      }),
       qrCanvas(setup),
       h("p", { class: "hint", text: "Can't scan it? Enter this key instead:" }),
       h("p", { class: "mfa-secret", text: setup.secret }),

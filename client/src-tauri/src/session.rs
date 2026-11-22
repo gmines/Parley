@@ -293,7 +293,7 @@ impl SessionManager {
         let mut guard = self.state.lock().await;
         let access = self.fresh_access(&mut guard, rejected).await?;
         // A restricted token works nowhere else, so say why instead of a 401.
-        if guard.as_ref().is_some_and(|a| !a.user.mfa_enabled) {
+        if guard.as_ref().is_some_and(|a| !a.user.mfa_enabled && a.user.mfa_required) {
             return Err(AppError::Api {
                 code: "mfa_setup_required".into(),
                 message: "set up two-factor authentication to continue".into(),

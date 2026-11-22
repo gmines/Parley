@@ -25,3 +25,11 @@ callers outside your network).
 Check it:
   kubectl -n {{ .Release.Namespace }} get pods -l app.kubernetes.io/instance={{ .Release.Name }}
   curl {{ include "parley.httpScheme" . }}://{{ .Values.host }}/v1/meta
+{{- if .Values.admin.enabled }}
+
+Admin app (not exposed; reach it through a tunnel):
+  kubectl -n {{ .Release.Namespace }} port-forward deploy/{{ include "parley.name" . }}-admin 8090:8090
+  then open http://localhost:8090
+First admin account:
+  kubectl -n {{ .Release.Namespace }} exec -it deploy/{{ include "parley.name" . }}-admin -- /api admin create <username>
+{{- end }}

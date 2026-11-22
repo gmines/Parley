@@ -13,6 +13,7 @@ export function accountView(
   onUser: (u: User) => void,
   onSignedOut: (message: string) => void,
   onMfaReset: (u: User) => void,
+  onMfaSetup: (u: User) => void,
 ): HTMLElement {
   let user = initialUser;
   let features: Features | null = null;
@@ -117,10 +118,24 @@ export function accountView(
   }
 
   function mfaSection() {
+    if (!user.mfa_enabled) {
+      // Only reachable when the server doesn't require MFA for this account.
+      return h(
+        "section",
+        { class: "settings-section" },
+        h("h2", { text: "Two-factor authentication" }),
+        h("p", { class: "hint", text: "Off. Turn it on to require a code from an authenticator app (Google Authenticator, Aegis, 1Password…) whenever you sign in." }),
+        h(
+          "div",
+          { class: "form-actions" },
+          h("button", { class: "btn btn-sm btn-primary", attrs: { type: "button" }, text: "Set up authenticator", on: { click: () => onMfaSetup(user) } }),
+        ),
+      );
+    }
     const panel = h("div", { class: "contact-panel" });
     const start = h("button", {
       class: "btn btn-sm btn-ghost",
-      text: "Replace authenticator",
+      text: user.mfa_required ? "Replace authenticator" : "Replace or remove authenticator",
       on: {
         click: () => {
           const password = input("mfa_pw", "Current password", "", "", "password");
@@ -132,7 +147,12 @@ export function accountView(
           const form = h(
             "form",
             { class: "inline-form" },
-            h("p", { class: "hint", text: "This signs out all your devices and invalidates your recovery codes. You'll set up a new authenticator right away." }),
+            h("p", {
+              class: "hint",
+              text: user.mfa_required
+                ? "This signs out all your devices and invalidates your recovery codes. You'll set up a new authenticator right away."
+                : "This signs out all your devices and invalidates your recovery codes. Two-factor stays off until you set it up again.",
+            }),
             password.field,
             code.field,
             error,

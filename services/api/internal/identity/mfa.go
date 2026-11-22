@@ -2,17 +2,8 @@ package identity
 
 import (
 	"context"
-	"crypto/aes"
-	"crypto/cipher"
-	"crypto/hmac"
 	"crypto/rand"
-	"crypto/sha1"
-	"crypto/subtle"
-	"encoding/base32"
-	"encoding/binary"
 	"errors"
-	"fmt"
-	"net/url"
 	"strings"
 	"time"
 
@@ -20,14 +11,13 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"parley/pkg/auth"
+	"parley/services/api/internal/sealbox"
+	"parley/services/api/internal/totp"
 )
 
 const (
-	totpPeriod       = 30
-	totpWindow       = 1 // steps of clock drift accepted either side
-	recoveryCodes    = 10
-	mfaChallengeTTL  = 5 * time.Minute
-	totpSecretLength = 20
+	recoveryCodes   = 10
+	mfaChallengeTTL = 5 * time.Minute
 )
 
 var (
@@ -36,8 +26,6 @@ var (
 	ErrMFAAlreadyEnabled = errors.New("two-factor authentication is already set up")
 	ErrMFANotStarted     = errors.New("start two-factor setup first")
 )
-
-var totpEncoding = base32.StdEncoding.WithPadding(base32.NoPadding)
 
 // MFAEnrollment is what an authenticator app needs.
 type MFAEnrollment struct {
@@ -53,8 +41,8 @@ type Enrolled struct {
 
 // StartEnrollment creates a new TOTP secret, unconfirmed until ConfirmEnrollment.
 func (s *Service) StartEnrollment(ctx context.Context, userID uuid.UUID) (MFAEnrollment, error) {
-	secret := make([]byte, totpSecretLength)
-	if _, err := rand.Read(secret); err != nil {
+	secret, err := totp.NewSecret()
+	if err != nil {
 		return MFAEnrollment{}, err
 	}
 	sealed, err := s.seal(userID, secret)
@@ -70,11 +58,10 @@ func (s *Service) StartEnrollment(ctx context.Context, userID uuid.UUID) (MFAEnr
 	if err != nil {
 		return MFAEnrollment{}, err
 	}
-	encoded := totpEncoding.EncodeToString(secret)
-	app := s.cfg.Recovery.AppName
-	q := url.Values{"secret": {encoded}, "issuer": {app}, "algorithm": {"SHA1"}, "digits": {"6"}, "period": {"30"}}
-	uri := "otpauth://totp/" + url.PathEscape(app+":"+username) + "?" + q.Encode()
-	return MFAEnrollment{Secret: encoded, OTPAuthURI: uri}, nil
+	return MFAEnrollment{
+		Secret:     totp.Encoding.EncodeToString(secret),
+		OTPAuthURI: totp.URI(s.cfg().Recovery.AppName, username, secret),
+	}, nil
 }
 
 // ConfirmEnrollment turns MFA on once a code proves the app is set up. Every
@@ -111,7 +98,7 @@ func (s *Service) ConfirmEnrollment(ctx context.Context, userID uuid.UUID, code,
 		if err != nil {
 			return err
 		}
-		step, ok := matchTOTP(secret, code, s.now(), 0)
+		step, ok := totp.Match(secret, code, s.now(), 0)
 		if !ok {
 			bad = true
 			return nil
@@ -152,7 +139,7 @@ func (s *Service) ConfirmEnrollment(ctx context.Context, userID uuid.UUID, code,
 
 // challenge returns the second step of a login for an account with MFA.
 func (s *Service) challenge(u User) (Session, error) {
-	token, exp, err := s.cfg.Signer.SignChallenge(auth.Claims{UserID: u.ID, Username: u.Username}, mfaChallengeTTL)
+	token, exp, err := s.cfg().Signer.SignChallenge(auth.Claims{UserID: u.ID, Username: u.Username}, mfaChallengeTTL)
 	if err != nil {
 		return Session{}, err
 	}
@@ -302,7 +289,7 @@ func (s *Service) consumeSecondFactor(ctx context.Context, tx pgx.Tx, userID uui
 		if err != nil {
 			return false, err
 		}
-		step, ok := matchTOTP(secret, code, s.now(), lastStep)
+		step, ok := totp.Match(secret, code, s.now(), lastStep)
 		if !ok {
 			return false, nil
 		}
@@ -324,7 +311,7 @@ func replaceRecoveryCodes(ctx context.Context, tx pgx.Tx, userID uuid.UUID) ([]s
 		if _, err := rand.Read(raw); err != nil {
 			return nil, err
 		}
-		c := totpEncoding.EncodeToString(raw)
+		c := totp.Encoding.EncodeToString(raw)
 		codes[i] = c[:4] + "-" + c[4:8] + "-" + c[8:12] + "-" + c[12:]
 		if _, err := tx.Exec(ctx, `INSERT INTO mfa_recovery_codes (user_id, code_hash) VALUES ($1, $2)`,
 			userID, hashToken(normalizeRecoveryCode(codes[i]))); err != nil {
@@ -350,73 +337,19 @@ func (s *Service) mfaFailed(ctx context.Context, keys []throttleKey) error {
 	return ErrInvalidMFACode
 }
 
-func (s *Service) verifier() *auth.Verifier { return s.cfg.Verifier }
-
-// TOTP (RFC 6238) ------------------------------------------------------------
-
-func totpAt(secret []byte, step int64) string {
-	var msg [8]byte
-	binary.BigEndian.PutUint64(msg[:], uint64(step))
-	mac := hmac.New(sha1.New, secret)
-	mac.Write(msg[:])
-	sum := mac.Sum(nil)
-	offset := sum[len(sum)-1] & 0x0f
-	n := binary.BigEndian.Uint32(sum[offset:offset+4]) & 0x7fffffff
-	return fmt.Sprintf("%06d", n%1_000_000)
-}
-
-// matchTOTP returns the step matching code, if it is newer than after.
-func matchTOTP(secret []byte, code string, now time.Time, after int64) (int64, bool) {
-	current := now.Unix() / totpPeriod
-	code = strings.TrimSpace(code)
-	for step := current - totpWindow; step <= current+totpWindow; step++ {
-		if step > after && subtle.ConstantTimeCompare([]byte(totpAt(secret, step)), []byte(code)) == 1 {
-			return step, true
-		}
-	}
-	return 0, false
-}
+func (s *Service) verifier() *auth.Verifier { return s.cfg().Verifier }
 
 // GenerateTOTP returns the code for a base32 secret at t, as an authenticator
 // app would. Used by tests.
-func GenerateTOTP(secret string, t time.Time) (string, error) {
-	raw, err := totpEncoding.DecodeString(secret)
-	if err != nil {
-		return "", err
-	}
-	return totpAt(raw, t.Unix()/totpPeriod), nil
-}
+func GenerateTOTP(secret string, t time.Time) (string, error) { return totp.Generate(secret, t) }
 
 // Secret sealing: a database dump alone doesn't reveal TOTP secrets. The user
 // ID is authenticated, so a sealed secret can't be moved to another account.
 
-func (s *Service) gcm() (cipher.AEAD, error) {
-	block, err := aes.NewCipher(s.cfg.MFAKey)
-	if err != nil {
-		return nil, err
-	}
-	return cipher.NewGCM(block)
-}
-
 func (s *Service) seal(userID uuid.UUID, secret []byte) ([]byte, error) {
-	gcm, err := s.gcm()
-	if err != nil {
-		return nil, err
-	}
-	nonce := make([]byte, gcm.NonceSize())
-	if _, err := rand.Read(nonce); err != nil {
-		return nil, err
-	}
-	return gcm.Seal(nonce, nonce, secret, userID[:]), nil
+	return sealbox.Seal(s.cfg().MFAKey, userID[:], secret)
 }
 
 func (s *Service) open(userID uuid.UUID, sealed []byte) ([]byte, error) {
-	gcm, err := s.gcm()
-	if err != nil {
-		return nil, err
-	}
-	if len(sealed) < gcm.NonceSize() {
-		return nil, errors.New("malformed MFA secret")
-	}
-	return gcm.Open(nil, sealed[:gcm.NonceSize()], sealed[gcm.NonceSize():], userID[:])
+	return sealbox.Open(s.cfg().MFAKey, userID[:], sealed)
 }

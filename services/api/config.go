@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -13,6 +12,7 @@ import (
 
 	"parley/services/api/internal/delivery"
 	"parley/services/api/internal/identity"
+	"parley/services/api/internal/settings"
 )
 
 // Login lockout:
@@ -98,24 +98,11 @@ func recoveryConfig() (identity.RecoveryConfig, error) {
 		return c, fmt.Errorf(`PARLEY_RECOVERY_SMS must be "off", "twilio" or "log", got %q`, mode)
 	}
 	if c.EmailEnabled || c.SMSEnabled {
-		if err := checkAccountURL(c.AccountURL); err != nil {
+		if err := settings.CheckAccountURL(c.AccountURL); err != nil {
 			return c, err
 		}
 	}
 	return c, nil
-}
-
-// checkAccountURL requires https, since the page carries new passwords and
-// link tokens. Plain http is allowed only for a server on this machine.
-func checkAccountURL(raw string) error {
-	u, err := url.Parse(raw)
-	if err != nil || u.Host == "" {
-		return errors.New("PARLEY_ACCOUNT_PUBLIC_URL is required when email or SMS is enabled, e.g. https://account.example.org")
-	}
-	if host := u.Hostname(); u.Scheme != "https" && !(u.Scheme == "http" && (host == "localhost" || host == "127.0.0.1")) {
-		return errors.New("PARLEY_ACCOUNT_PUBLIC_URL must use https")
-	}
-	return nil
 }
 
 // mfaKey decodes PARLEY_MFA_KEY, a base64 32-byte key sealing TOTP secrets.

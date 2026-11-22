@@ -75,9 +75,11 @@ paths:
     post:
       summary: Create an authenticator secret
       description: |
-        MFA is mandatory. Sessions for accounts without it (`user.mfa_enabled`
-        false) carry an enrollment token, accepted only by these two
-        endpoints and rejected everywhere else.
+        Where MFA is required (`user.mfa_required`, from the account's policy
+        and the server default) and not set up (`user.mfa_enabled` false),
+        sessions carry an enrollment token, accepted only by these two
+        endpoints and rejected everywhere else. Accounts where MFA is optional
+        get full tokens, which these endpoints also accept (opting in).
       responses:
         '200': { description: 'JSON with secret and otpauth_uri' }
         '401': { $ref: '#/components/responses/Error' }
@@ -138,9 +140,12 @@ paths:
         IPs lock the account (configurable; see services/api/config.go). Locked
         requests get 429 `too_many_attempts` with a Retry-After header, even
         with the right password. Unknown usernames are counted the same way.
+        An account an administrator disabled gets 403 `account_disabled`
+        (only after the right password); its refresh tokens are rejected.
       responses:
         '200': { $ref: '#/components/responses/Session' }
         '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
         '429': { $ref: '#/components/responses/Error' }
   /v1/auth/refresh:
     post:
@@ -565,6 +570,13 @@ components:
         email_verified: { type: boolean }
         phone: { type: string }
         phone_verified: { type: boolean }
+        mfa_enabled: { type: boolean, description: An authenticator app is set up }
+        mfa_required:
+          type: boolean
+          description: |
+            Must set up MFA before using the app. When true and mfa_enabled is
+            false, the session is enrollment-only. Absent on older servers,
+            where MFA was always required.
     UserRef:
       type: object
       properties:

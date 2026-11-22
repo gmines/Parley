@@ -219,11 +219,13 @@ while people update, set `voice.sip.plain.enabled: true` and open TCP+UDP
 
 ## Sign-up, password reset and MFA
 
-New accounts are created from a link sent by email or SMS, and every account
-must set up an authenticator app. Three things are needed:
+New accounts are created from a link sent by email or SMS. By default every
+account must set up an authenticator app; the [admin app](#admin-app) can make
+that optional server-wide or per user. Three things are needed:
 
 1. **Delivery.** Under `api.extraEnv` set `PARLEY_RECOVERY_EMAIL: smtp` and the
-   `PARLEY_SMTP_*` settings (see `services/api/config.go`).
+   `PARLEY_SMTP_*` settings (see `services/api/config.go`), or set it up in the
+   admin app's Settings page instead.
 2. **The account page.** Set `accountWeb.enabled: true` and `accountWeb.host`
    to its own hostname. It cannot share `host`, which must stay DNS-only for SIP.
 3. **Back up `mfa-key`** from the release's Secret. Without it nobody's
@@ -243,6 +245,55 @@ stop working as soon as the server is upgraded.
 
 ### Locked-out users
 
-For someone who lost both their authenticator and recovery codes:
+For someone who lost both their authenticator and recovery codes, use
+**Reset MFA** on their page in the admin app, or:
 
     kubectl exec deploy/<release>-api -- /api mfa-reset <username>
+
+## Admin app
+
+A web app for operators: find users, change their display name, email and
+phone, set their MFA policy, reset their MFA, send or create password reset
+links, sign them out everywhere and disable accounts; and change server
+settings (MFA default, session lifetimes, sign-in lockout, email and SMS
+delivery) without a redeploy. Every action is recorded in its audit log.
+
+It is never exposed to the network. The `<release>-admin` pod listens on its
+own loopback only, has no Service or Ingress, and a NetworkPolicy refuses all
+connections to it. You reach it with your Kubernetes credentials:
+
+    kubectl -n parley port-forward deploy/parley-admin 8090:8090
+
+then open <http://localhost:8090>. Through an SSH tunnel to the server, run the
+port-forward there and forward the port: `ssh -L 8090:127.0.0.1:8090 <server>`.
+
+**First admin.** Admin accounts are separate from Parley accounts. Create one
+from the pod; it prints a password and an authenticator key once:
+
+    kubectl -n parley exec -it deploy/parley-admin -- /api admin create <username>
+
+Add the key to an authenticator app, sign in with the password and a code, and
+change the password under *Your account*. Other commands: `api admin list`,
+`reset <username>` (new password and authenticator, e.g. a lost phone),
+`disable <username>`, `enable <username>`.
+
+**Security.** Sign-in needs password and TOTP code; five failures lock the
+username for 15 minutes. Sessions end after 30 minutes idle or 12 hours. The
+cookie is `HttpOnly`, `Secure` and `SameSite=Strict`, every change needs a
+custom header (CSRF), the `Host` must be `localhost` (DNS rebinding), and the
+page runs under a strict Content Security Policy. Admins never see passwords:
+a reset link lets the user choose their own. Stored SMTP and Twilio
+credentials are encrypted with a key derived from `mfa-key` and never shown
+again; reset links aren't written to the audit log.
+
+**Settings precedence.** Each settings group either uses the deployment's
+values (Helm values / `api.extraEnv`) or an override saved in the admin app;
+*Use deployment value* removes the override. The api picks up changes within
+10 seconds. The MFA default lives only in the database and starts as
+"required".
+
+**MFA policy.** Each user follows the server default, is always required, or
+is exempt. Making MFA optional needs client 0.12 or later; older clients keep
+showing the setup screen to users without an authenticator (they can still
+enroll). Tightening the policy reaches signed-in devices at their next token
+refresh, within the access token lifetime.

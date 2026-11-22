@@ -128,7 +128,7 @@ func TestSignupRateLimitsAndReuse(t *testing.T) {
 
 func TestSignupPerIPCap(t *testing.T) {
 	s, _, _, _ := linkService(t)
-	s.cfg.Recovery.MaxSignupsPerIPHour = 2
+	s.cfg().Recovery.MaxSignupsPerIPHour = 2
 	ctx := context.Background()
 	for i, name := range []string{"aa", "bb"} {
 		if err := s.Signup(ctx, Signup{Username: name, Email: name + "@example.org"}, ipA); err != nil {

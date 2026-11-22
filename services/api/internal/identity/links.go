@@ -67,7 +67,7 @@ func (s *Service) Signup(ctx context.Context, in Signup, clientIP string) error 
 	var link *pendingCode
 	err = pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
 		link = nil
-		now, c := s.now(), s.cfg.Recovery
+		now, c := s.now(), s.cfg().Recovery
 		// Abandoned sign-ups release their username and address.
 		if _, err := tx.Exec(ctx, `DELETE FROM users u WHERE u.activated_at IS NULL AND u.created_at < $1
 			AND NOT EXISTS (SELECT 1 FROM account_links l WHERE l.user_id = u.id AND l.consumed_at IS NULL AND l.expires_at > $2)`,
@@ -152,7 +152,7 @@ func (s *Service) Signup(ctx context.Context, in Signup, clientIP string) error 
 // named by identifier (username, email or phone). It reports success whether
 // or not anything was sent, so it can't be used to probe accounts.
 func (s *Service) RequestPasswordReset(ctx context.Context, identifier, clientIP string) error {
-	if !s.cfg.Recovery.EmailEnabled && !s.cfg.Recovery.SMSEnabled {
+	if !s.cfg().Recovery.EmailEnabled && !s.cfg().Recovery.SMSEnabled {
 		return ErrFeatureDisabled
 	}
 	identifier = strings.TrimSpace(identifier)
@@ -163,7 +163,7 @@ func (s *Service) RequestPasswordReset(ctx context.Context, identifier, clientIP
 	var link *pendingCode
 	err := pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
 		var u User
-		err := tx.QueryRow(ctx, `SELECT `+userCols("u")+` FROM users u WHERE u.activated_at IS NOT NULL AND (
+		err := tx.QueryRow(ctx, `SELECT `+userCols("u")+` FROM users u WHERE u.activated_at IS NOT NULL AND u.disabled_at IS NULL AND (
 			u.username = $1 OR (u.email = $2 AND u.email_verified_at IS NOT NULL) OR (u.phone = $3 AND u.phone_verified_at IS NOT NULL))`,
 			NormalizeUsername(identifier), email, phone).Scan(userDest(&u)...)
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -172,7 +172,7 @@ func (s *Service) RequestPasswordReset(ctx context.Context, identifier, clientIP
 		if err != nil {
 			return err
 		}
-		c := s.cfg.Recovery
+		c := s.cfg().Recovery
 		emailOK := u.EmailVerified && c.EmailEnabled && phone == ""
 		smsOK := u.PhoneVerified && c.SMSEnabled && email == ""
 		var channel, dest string
@@ -251,7 +251,7 @@ func (s *Service) CompleteLink(ctx context.Context, token, newPassword string) e
 		if err := checkPasswordStrength(newPassword, u.Username, u.DisplayName); err != nil {
 			return err
 		}
-		hash, err := hashPassword(newPassword, s.cfg.Hash)
+		hash, err := hashPassword(newPassword, s.cfg().Hash)
 		if err != nil {
 			return err
 		}
@@ -267,13 +267,19 @@ func (s *Service) CompleteLink(ctx context.Context, token, newPassword string) e
 				return err
 			}
 		case linkReset:
-			// The contact may have been changed or removed since the link was sent.
-			current, verified := u.Email, u.EmailVerified
-			if channel == channelSMS {
-				current, verified = u.Phone, u.PhoneVerified
-			}
-			if !verified || current != dest {
+			if u.Disabled {
 				return ErrInvalidLink
+			}
+			// The contact may have been changed or removed since the link was
+			// sent. Links an admin handed over directly weren't sent anywhere.
+			if channel != channelAdmin {
+				current, verified := u.Email, u.EmailVerified
+				if channel == channelSMS {
+					current, verified = u.Phone, u.PhoneVerified
+				}
+				if !verified || current != dest {
+					return ErrInvalidLink
+				}
 			}
 			if err := setPassword(ctx, tx, u, hash); err != nil {
 				return err
@@ -295,7 +301,7 @@ func (s *Service) CompleteLink(ctx context.Context, token, newPassword string) e
 
 // checkLinkRate enforces the resend interval and hourly cap per user and purpose.
 func (s *Service) checkLinkRate(ctx context.Context, q db.Querier, userID uuid.UUID, purpose string) error {
-	c := s.cfg.Recovery
+	c := s.cfg().Recovery
 	now := s.now()
 	var (
 		lastHour int
@@ -315,33 +321,42 @@ func (s *Service) checkLinkRate(ctx context.Context, q db.Querier, userID uuid.U
 // issueLink stores a new link, superseding earlier unused ones for the same
 // purpose, and returns the message to deliver once the transaction commits.
 func (s *Service) issueLink(ctx context.Context, tx pgx.Tx, u User, purpose, channel, dest, clientIP string) (pendingCode, error) {
+	ttl := s.cfg().Recovery.ResetTTL
+	if purpose == linkActivate {
+		ttl = s.cfg().Recovery.ActivationTTL
+	}
+	url, err := s.storeLink(ctx, tx, u, purpose, channel, dest, clientIP, ttl)
+	if err != nil {
+		return pendingCode{}, err
+	}
+	return pendingCode{channel: channel, msg: s.linkMessage(u, purpose, channel, dest, url, ttl)}, nil
+}
+
+// storeLink saves a new link, superseding earlier unused ones for the same
+// purpose, and returns its URL.
+func (s *Service) storeLink(ctx context.Context, tx pgx.Tx, u User, purpose, channel, dest, clientIP string, ttl time.Duration) (string, error) {
 	raw := make([]byte, 32)
 	if _, err := rand.Read(raw); err != nil {
-		return pendingCode{}, err
+		return "", err
 	}
 	token := base64.RawURLEncoding.EncodeToString(raw)
 	now := s.now()
-	ttl := s.cfg.Recovery.ResetTTL
-	if purpose == linkActivate {
-		ttl = s.cfg.Recovery.ActivationTTL
-	}
 	if _, err := tx.Exec(ctx, `UPDATE account_links SET consumed_at = $3 WHERE user_id = $1 AND purpose = $2 AND consumed_at IS NULL`,
 		u.ID, purpose, now); err != nil {
-		return pendingCode{}, err
+		return "", err
 	}
 	if _, err := tx.Exec(ctx, `INSERT INTO account_links (user_id, purpose, channel, destination, token_hash, request_ip, expires_at, created_at)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
 		u.ID, purpose, channel, dest, hashToken(token), clientIP, now.Add(ttl), now); err != nil {
-		return pendingCode{}, err
+		return "", err
 	}
 	// The token goes in the fragment, which browsers never send to a server,
 	// so it stays out of CDN, proxy and access logs.
-	url := strings.TrimRight(s.cfg.Recovery.AccountURL, "/") + "/account/set-password#t=" + token
-	return pendingCode{channel: channel, msg: s.linkMessage(u, purpose, channel, dest, url, ttl)}, nil
+	return strings.TrimRight(s.cfg().Recovery.AccountURL, "/") + "/account/set-password#t=" + token, nil
 }
 
 func (s *Service) linkMessage(u User, purpose, channel, dest, url string, ttl time.Duration) delivery.Message {
-	app := s.cfg.Recovery.AppName
+	app := s.cfg().Recovery.AppName
 	expires := fmt.Sprintf("%d minutes", int(ttl.Minutes()))
 	if ttl >= 2*time.Hour {
 		expires = fmt.Sprintf("%d hours", int(ttl.Hours()))
@@ -367,7 +382,7 @@ func (s *Service) linkMessage(u User, purpose, channel, dest, url string, ttl ti
 // notify tells the account's owner about a security-relevant change, on the
 // first verified contact. Best effort.
 func (s *Service) notify(ctx context.Context, u User, subject, body string) {
-	c := s.cfg.Recovery
+	c := s.cfg().Recovery
 	switch {
 	case u.EmailVerified && c.EmailEnabled:
 		s.deliver(ctx, pendingCode{channel: channelEmail, msg: delivery.Message{To: u.Email, Subject: c.AppName + ": " + subject, Body: body}})

@@ -87,6 +87,19 @@ accountWeb:
     requests: { cpu: 10m, memory: 16Mi }
     limits: { memory: 64Mi }
 
+# Operator app: users, MFA policy and server settings. Loopback-only, with no
+# Service or Ingress; reach it with kubectl port-forward (see README.md).
+admin:
+  enabled: true
+  # Drop the session cookie's Secure flag, for browsers that don't treat
+  # http://localhost as a secure origin (Chrome and Firefox do).
+  insecureCookie: false
+  networkPolicy:
+    enabled: true
+  resources:
+    requests: { cpu: 10m, memory: 32Mi }
+    limits: { memory: 128Mi }
+
 realtime:
   replicas: 2
   resources:

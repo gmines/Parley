@@ -21,6 +21,10 @@ pub struct User {
     /// Servers without MFA don't send this and don't require it.
     #[serde(default = "default_true")]
     pub mfa_enabled: bool,
+    /// Whether the account must set up MFA before using the app. Servers
+    /// that don't send it made MFA mandatory (when they had it at all).
+    #[serde(default = "default_true")]
+    pub mfa_required: bool,
 }
 
 fn default_true() -> bool {

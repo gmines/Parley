@@ -89,7 +89,8 @@ func TestMFAEnforcementOverHTTP(t *testing.T) {
 	}
 	full := &client{t: t, base: base, token: out.AccessToken}
 	full.do("GET", "/v1/users/me", nil, 200, nil)
-	full.do("POST", "/v1/auth/mfa/enroll/start", nil, 401, nil)
+	// Full tokens reach enrollment (for accounts opting in), but it's done.
+	full.do("POST", "/v1/auth/mfa/enroll/start", nil, 409, nil)
 	// The other device's password-only session is gone.
 	anon.do("POST", "/v1/auth/refresh", map[string]string{"refresh_token": device2.RefreshToken}, 401, nil)
 

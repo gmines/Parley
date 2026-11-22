@@ -1,0 +1,98 @@
+{{- if .Values.admin.enabled }}
+{{- $base := include "parley.name" . }}
+{{- $name := printf "%s-admin" $base }}
+# The admin app (users, MFA policy, server settings). It listens on the pod's
+# loopback only and has no Service or Ingress: the only way in is
+#   kubectl -n {{ .Release.Namespace }} port-forward deploy/{{ $name }} 8090:8090
+# which needs Kubernetes credentials. See README.md, "Admin app".
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "parley.labels" . | nindent 4 }}
+    {{- include "parley.selector" (list . "admin") | nindent 4 }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "parley.selector" (list . "admin") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "parley.labels" . | nindent 8 }}
+        {{- include "parley.selector" (list . "admin") | nindent 8 }}
+      annotations:
+        checksum/secrets: {{ toJson (list .Values.secrets .Values.postgres.password) | sha256sum }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      securityContext:
+        {{- include "parley.podSecurity" . | nindent 8 }}
+      containers:
+        - name: admin
+          image: {{ include "parley.image" (list . "api") }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args: ["admin", "serve"]
+          env:
+            - name: PARLEY_ADMIN_LISTEN_ADDR
+              value: "127.0.0.1:8090"
+            - name: PARLEY_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  {{- include "parley.databaseUrlRef" . | nindent 18 }}
+            # Unseals TOTP secrets and stored SMTP/Twilio credentials. The
+            # signing key is deliberately not here: this app never issues tokens.
+            - name: PARLEY_MFA_KEY
+              valueFrom:
+                secretKeyRef: { name: {{ include "parley.secretName" . }}, key: mfa-key }
+            {{- if .Values.accountWeb.enabled }}
+            - name: PARLEY_ACCOUNT_PUBLIC_URL
+              value: {{ printf "https://%s" .Values.accountWeb.host | quote }}
+            {{- end }}
+            # The deployment defaults the Settings page shows and overrides.
+            - name: PARLEY_ACCESS_TTL
+              value: {{ .Values.api.accessTTL | quote }}
+            - name: PARLEY_REFRESH_TTL
+              value: {{ .Values.api.refreshTTL | quote }}
+            {{- range $k, $v := .Values.api.extraEnv }}
+            - name: {{ $k }}
+              value: {{ $v | quote }}
+            {{- end }}
+            {{- if .Values.admin.insecureCookie }}
+            - name: PARLEY_ADMIN_INSECURE_COOKIE
+              value: "true"
+            {{- end }}
+          # kubelet can't reach a loopback listener, so the probes run inside.
+          readinessProbe:
+            exec: { command: ["/api", "admin", "healthcheck"] }
+            periodSeconds: 15
+          livenessProbe:
+            exec: { command: ["/api", "admin", "healthcheck"] }
+            periodSeconds: 30
+            failureThreshold: 4
+          resources:
+            {{- toYaml .Values.admin.resources | nindent 12 }}
+          securityContext:
+            {{- include "parley.containerSecurity" . | nindent 12 }}
+{{- if .Values.admin.networkPolicy.enabled }}
+---
+# Nothing may connect to the admin pod over the network. port-forward isn't
+# affected: it reaches the pod's loopback from inside its network namespace.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "parley.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "parley.selector" (list . "admin") | nindent 6 }}
+  policyTypes: [Ingress]
+  ingress: []
+{{- end }}
+{{- end }}

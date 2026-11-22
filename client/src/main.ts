@@ -32,12 +32,18 @@ async function start() {
 
 /** The app, unless this account still has to set up MFA. */
 function enter(user: User) {
-  if (user.mfa_enabled) return showApp(user);
+  if (user.mfa_enabled || user.mfa_required === false) return showApp(user);
   leaveApp();
   mount(root, mfaSetupView(showApp, async () => {
     await api.logout();
     showAuth();
   }));
+}
+
+/** Optional setup, from Account settings, for accounts where MFA isn't required. */
+function optInMfa(user: User) {
+  leaveApp();
+  mount(root, mfaSetupView(showApp, () => showApp(user), { optional: true }));
 }
 
 /** The server now requires MFA for this session (it was upgraded, or MFA was reset elsewhere). */
@@ -235,7 +241,7 @@ function showApp(initialUser: User) {
             user = u;
             store.setMe(u);
             renderMe();
-          }, signedOut, enter),
+          }, signedOut, enter, optInMfa),
         );
       });
     } else if (page.kind === "audio") {

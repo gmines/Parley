@@ -48,6 +48,7 @@ import (
 	"parley/services/api/internal/httpapi"
 	"parley/services/api/internal/identity"
 	"parley/services/api/internal/messaging"
+	"parley/services/api/internal/settings"
 	"parley/services/api/internal/social"
 	"parley/services/api/migrations"
 )
@@ -80,6 +81,14 @@ func main() {
 		fmt.Println("MFA cleared; the user must set it up again at next login.")
 		return
 	}
+	// `api admin <command>`: the admin app and its accounts; see admin.go.
+	if len(os.Args) >= 2 && os.Args[1] == "admin" {
+		if err := adminMain(os.Args[2:]); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return
+	}
 	if err := run(); err != nil {
 		slog.Error("api exited", "err", err)
 		os.Exit(1)
@@ -110,6 +119,9 @@ func adminResetMFA(username string) error {
 	}
 	return ident.AdminResetMFA(ctx, username)
 }
+
+// settingsPoll is how soon a change made in the admin app reaches the api.
+const settingsPoll = 10 * time.Second
 
 func run() error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -171,6 +183,18 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	// Settings changed in the admin app override the environment's, and are
+	// picked up while running.
+	store, err := settings.NewStore(pool, mfa)
+	if err != nil {
+		return err
+	}
+	base := ident.Runtime()
+	if err := store.Apply(ctx, base, ident.SetRuntime); err != nil {
+		slog.Error("loading stored settings; using the environment's", "err", err)
+	}
+	go store.Watch(ctx, base, ident.SetRuntime, settingsPoll)
+
 	var pub events.Publisher = events.Discard{}
 	if natsURL := os.Getenv("PARLEY_NATS_URL"); natsURL != "" {
 		nc, err := nats.Connect(natsURL, nats.Name("parley-api"), nats.MaxReconnects(-1))
@@ -198,9 +222,11 @@ func run() error {
 	// The realtime service verifies access tokens with this public key
 	// (its PARLEY_VERIFY_KEY).
 	slog.Info("access token public key", "PARLEY_VERIFY_KEY", auth.EncodePublicKey(key.Public().(ed25519.PublicKey)))
+	rt := ident.Runtime()
 	slog.Info("config",
-		"lockout_max_failures", lockout.MaxFailures, "lockout_duration", lockout.Duration.String(),
-		"lockout_scope", lockout.Scope, "email_recovery", recovery.EmailEnabled, "sms_recovery", recovery.SMSEnabled)
+		"lockout_max_failures", rt.Lockout.MaxFailures, "lockout_duration", rt.Lockout.Duration.String(),
+		"lockout_scope", rt.Lockout.Scope, "email_recovery", rt.Recovery.EmailEnabled, "sms_recovery", rt.Recovery.SMSEnabled,
+		"access_ttl", rt.AccessTTL.String(), "refresh_ttl", rt.RefreshTTL.String())
 
 	httpSrv := &http.Server{
 		Addr:              addr,
