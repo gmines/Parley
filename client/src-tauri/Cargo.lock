@@ -2920,7 +2920,7 @@ dependencies = [
 
 [[package]]
 name = "parley-client"
-version = "0.13.0"
+version = "0.13.1"
 dependencies = [
  "cc",
  "chrono",
