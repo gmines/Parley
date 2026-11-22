@@ -36,6 +36,7 @@ const (
 	KeySessions = "sessions"
 	KeyEmail    = "email"
 	KeySMS      = "sms"
+	KeyInvites  = "invites"
 )
 
 // MFA is the server-wide default for accounts whose policy is "inherit".
@@ -82,6 +83,13 @@ type SMS struct {
 	AuthTokenSealed []byte `json:"auth_token_sealed,omitempty"`
 }
 
+// Invites controls user-to-user invites. Needs email enabled. DailyLimit caps
+// invites per inviter per 24h.
+type Invites struct {
+	Enabled    bool `json:"enabled"`
+	DailyLimit int  `json:"daily_limit"`
+}
+
 // Meta records who last changed a group.
 type Meta struct {
 	UpdatedAt time.Time `json:"updated_at"`
@@ -95,6 +103,7 @@ type Snapshot struct {
 	Sessions *Sessions
 	Email    *Email
 	SMS      *SMS
+	Invites  *Invites
 	Meta     map[string]Meta
 }
 
@@ -146,6 +155,9 @@ func (s *Store) Load(ctx context.Context) (Snapshot, error) {
 		case KeySMS:
 			snap.SMS = &SMS{}
 			dst = snap.SMS
+		case KeyInvites:
+			snap.Invites = &Invites{}
+			dst = snap.Invites
 		default:
 			continue
 		}
@@ -258,6 +270,14 @@ func (s *Store) PutSMS(ctx context.Context, x SMS, accountURL, by string) error 
 	})
 }
 
+// PutInvites validates and stores the invite settings.
+func (s *Store) PutInvites(ctx context.Context, x Invites, by string) error {
+	if x.Enabled && (x.DailyLimit < 1 || x.DailyLimit > 100) {
+		return invalid("daily invite limit must be between 1 and 100")
+	}
+	return pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error { return s.write(ctx, tx, KeyInvites, x, by) })
+}
+
 func (s *Store) lockGroup(ctx context.Context, tx pgx.Tx, key string) ([]byte, error) {
 	var raw []byte
 	err := tx.QueryRow(ctx, `SELECT value FROM server_settings WHERE key = $1 FOR UPDATE`, key).Scan(&raw)
@@ -271,7 +291,7 @@ func (s *Store) lockGroup(ctx context.Context, tx pgx.Tx, key string) ([]byte, e
 // "mfa" this means MFA is required.
 func (s *Store) Revert(ctx context.Context, key, by string) error {
 	switch key {
-	case KeyLockout, KeySessions, KeyEmail, KeySMS:
+	case KeyLockout, KeySessions, KeyEmail, KeySMS, KeyInvites:
 	case KeyMFA:
 		return s.PutMFA(ctx, MFA{Require: true}, by)
 	default:
@@ -475,6 +495,12 @@ func (s *Store) Resolve(base identity.Runtime, snap Snapshot) (identity.Runtime,
 			problems[KeySMS] = err
 		} else {
 			out.Recovery.SMS, out.Recovery.SMSEnabled = sender, sender != nil
+		}
+	}
+	if snap.Invites != nil {
+		out.Recovery.InvitesEnabled = snap.Invites.Enabled
+		if snap.Invites.DailyLimit > 0 {
+			out.Recovery.InviteDailyLimit = snap.Invites.DailyLimit
 		}
 	}
 	return out, problems

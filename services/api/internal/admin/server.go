@@ -591,7 +591,7 @@ func (s *Server) getSettings(w http.ResponseWriter, r *http.Request, adm Admin) 
 		"account_url": b.Recovery.AccountURL,
 		"mfa":         map[string]any{"require": snap.MFA.Require, "meta": meta(settings.KeyMFA)},
 	}
-	var lo, se, em, sm map[string]any
+	var lo, se, em, sm, inv map[string]any
 	if l := snap.Lockout; l != nil {
 		lo = map[string]any{"max_failures": l.MaxFailures, "duration": l.Duration, "window": l.Window, "scope": l.Scope,
 			"account_max_failures": l.AccountMaxFailures}
@@ -606,11 +606,16 @@ func (s *Server) getSettings(w http.ResponseWriter, r *http.Request, adm Admin) 
 	if x := snap.SMS; x != nil {
 		sm = map[string]any{"mode": x.Mode, "account_sid": x.AccountSID, "from": x.From, "has_auth_token": x.AuthTokenSealed != nil}
 	}
+	if x := snap.Invites; x != nil {
+		inv = map[string]any{"enabled": x.Enabled, "daily_limit": x.DailyLimit}
+	}
 	out[settings.KeyLockout] = view(settings.KeyLockout, snap.Lockout != nil, lo, lockoutView(b.Lockout))
 	out[settings.KeySessions] = view(settings.KeySessions, snap.Sessions != nil, se,
 		map[string]any{"access_ttl": settings.FormatDuration(b.AccessTTL), "refresh_ttl": settings.FormatDuration(b.RefreshTTL)})
 	out[settings.KeyEmail] = view(settings.KeyEmail, snap.Email != nil, em, emailView(b.Recovery.EmailEnabled, b.Recovery.Email))
 	out[settings.KeySMS] = view(settings.KeySMS, snap.SMS != nil, sm, smsView(b.Recovery.SMSEnabled, b.Recovery.SMS))
+	out[settings.KeyInvites] = view(settings.KeyInvites, snap.Invites != nil, inv,
+		map[string]any{"enabled": b.Recovery.InvitesEnabled, "daily_limit": b.Recovery.InviteDailyLimit})
 	httpx.WriteJSON(w, http.StatusOK, out)
 	return nil
 }
@@ -656,6 +661,12 @@ func (s *Server) putSetting(w http.ResponseWriter, r *http.Request, adm Admin) e
 		}
 		detail = map[string]any{"mode": v.Mode, "account_sid": v.AccountSID, "from": v.From, "auth_token_changed": v.AuthToken != ""}
 		err = s.Settings.PutSMS(ctx, v, url, by)
+	case settings.KeyInvites:
+		var v settings.Invites
+		if err := httpx.DecodeJSON(w, r, &v); err != nil {
+			return err
+		}
+		err, detail = s.Settings.PutInvites(ctx, v, by), map[string]any{"enabled": v.Enabled, "daily_limit": v.DailyLimit}
 	default:
 		return httpx.ErrNotFound
 	}

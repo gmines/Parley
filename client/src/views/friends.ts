@@ -30,6 +30,9 @@ export function friendsView(
   let blocked: Blocked[] = [];
   let loaded = false;
   let lastAdd: { kind: "ok" | "error"; text: string } | null = null;
+  let lastInvite: { kind: "ok" | "error"; text: string } | null = null;
+  let invitesEnabled = false;
+  let featuresChecked = false;
 
   const tabBar = h("nav", { class: "tabs", attrs: { role: "tablist" } });
   const content = h("section", { class: "content" });
@@ -42,8 +45,21 @@ export function friendsView(
 
   const view: FriendsView = { el, dispose, reload: () => void load() };
 
+  // Whether this server lets users invite others (checked once).
+  async function checkInvites() {
+    if (featuresChecked) return;
+    featuresChecked = true;
+    try {
+      const server = await api.savedServer();
+      if (server) invitesEnabled = !!(await api.serverFeatures(server)).invites;
+    } catch {
+      // Leave invites hidden if we can't tell.
+    }
+  }
+
   async function load() {
     try {
+      await checkInvites();
       [friends, requests, blocked] = await Promise.all([api.listFriends(), api.listRequests(), api.listBlocked()]);
       loaded = true;
       render();
@@ -223,8 +239,42 @@ export function friendsView(
       }
       await load();
     });
-    content.replaceChildren(form);
+    content.replaceChildren(...(invitesEnabled ? [form, inviteForm()] : [form]));
     input.focus();
+  }
+
+  function inviteForm() {
+    const email = h("input", {
+      attrs: { type: "email", placeholder: "name@example.org", "aria-label": "Email address", spellcheck: "false", autocomplete: "off" },
+    });
+    const send = h("button", { class: "btn btn-primary", text: "Send invite", attrs: { type: "submit" } });
+    const status = h("p", { class: lastInvite ? `add-status add-${lastInvite.kind}` : "add-status", text: lastInvite?.text ?? "" });
+    const form = h(
+      "form",
+      { class: "add-form" },
+      h("h2", { text: "Invite someone" }),
+      h("p", { class: "hint", text: "Invite a friend by email. They'll get a link to join Parley and pick a username, and you'll be added as friends." }),
+      h("div", { class: "add-row" }, email, send),
+      status,
+    );
+    form.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const addr = email.value.trim();
+      if (!addr) return;
+      send.disabled = true;
+      try {
+        await api.invite(addr);
+        lastInvite = { kind: "ok", text: `Invitation sent to ${addr}.` };
+        email.value = "";
+      } catch (err) {
+        if (["session_expired", "not_logged_in"].includes(errorCode(err) ?? "")) return handleError(err);
+        lastInvite = { kind: "error", text: errorMessage(err) };
+      } finally {
+        send.disabled = false;
+      }
+      render();
+    });
+    return form;
   }
 
   function blockBtn(user: UserRef) {

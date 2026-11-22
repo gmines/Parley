@@ -81,6 +81,7 @@ pub fn run() {
             commands::list_friends,
             commands::remove_friend,
             commands::list_requests,
+            commands::invite,
             commands::send_friend_request,
             commands::accept_friend_request,
             commands::delete_friend_request,

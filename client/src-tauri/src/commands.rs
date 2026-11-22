@@ -202,6 +202,16 @@ pub async fn fetch_me(state: State<'_, AppState>) -> Result<User> {
     Ok(user)
 }
 
+/// Invites someone to Parley by email. The server sends them an activation
+/// link; the invitee picks their own username. Requires the invites feature.
+#[tauri::command]
+pub async fn invite(state: State<'_, AppState>, email: String) -> Result<()> {
+    state
+        .session
+        .call_empty(Method::POST, "v1/invites", Some(json!({ "email": email })))
+        .await
+}
+
 #[tauri::command]
 pub async fn change_password(
     state: State<'_, AppState>,

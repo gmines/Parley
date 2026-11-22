@@ -36,13 +36,13 @@ func TestSignupActivation(t *testing.T) {
 		t.Fatalf("inspect: %+v %v", info, err)
 	}
 	// Inspecting (or a scanner fetching the page) doesn't use it up, nor does a weak password.
-	if err := s.CompleteLink(ctx, token, "12345678"); !errors.Is(err, ErrWeakPassword) {
+	if _, err := s.CompleteLink(ctx, token, "12345678", "", ""); !errors.Is(err, ErrWeakPassword) {
 		t.Fatalf("weak password err = %v", err)
 	}
-	if err := s.CompleteLink(ctx, token, strongPassword); err != nil {
+	if _, err := s.CompleteLink(ctx, token, strongPassword, "", ""); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.CompleteLink(ctx, token, newPassword); !errors.Is(err, ErrInvalidLink) {
+	if _, err := s.CompleteLink(ctx, token, newPassword, "", ""); !errors.Is(err, ErrInvalidLink) {
 		t.Fatalf("reuse err = %v", err)
 	}
 	sess, err := s.Login(ctx, "alice", strongPassword, ipA)
@@ -57,7 +57,7 @@ func TestSignupByPhoneAndValidation(t *testing.T) {
 	if err := s.Signup(ctx, Signup{Username: "bob", Phone: "+1 (555) 123-4567"}, ipA); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.CompleteLink(ctx, lastLink(t, sms, "+15551234567"), strongPassword); err != nil {
+	if _, err := s.CompleteLink(ctx, lastLink(t, sms, "+15551234567"), strongPassword, "", ""); err != nil {
 		t.Fatal(err)
 	}
 	sess, err := s.Login(ctx, "bob", strongPassword, ipA)
@@ -152,7 +152,7 @@ func TestAbandonedSignupReleasesUsername(t *testing.T) {
 		t.Fatalf("while pending err = %v", err)
 	}
 	clock.advance(25 * time.Hour)
-	if err := s.CompleteLink(ctx, token, strongPassword); !errors.Is(err, ErrInvalidLink) {
+	if _, err := s.CompleteLink(ctx, token, strongPassword, "", ""); !errors.Is(err, ErrInvalidLink) {
 		t.Fatalf("expired err = %v", err)
 	}
 	if err := s.Signup(ctx, Signup{Username: "squat", Email: "b@example.org"}, ipB); err != nil {
@@ -171,14 +171,14 @@ func TestPasswordResetLink(t *testing.T) {
 	}
 	expired := lastLink(t, email, addr)
 	clock.advance(31 * time.Minute)
-	if err := s.CompleteLink(ctx, expired, newPassword); !errors.Is(err, ErrInvalidLink) {
+	if _, err := s.CompleteLink(ctx, expired, newPassword, "", ""); !errors.Is(err, ErrInvalidLink) {
 		t.Fatalf("expired err = %v", err)
 	}
 	// By email address this time.
 	if err := s.RequestPasswordReset(ctx, "Gina@Example.org", ipA); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.CompleteLink(ctx, lastLink(t, email, addr), newPassword); err != nil {
+	if _, err := s.CompleteLink(ctx, lastLink(t, email, addr), newPassword, "", ""); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := s.Login(ctx, "gina", strongPassword, ipA); !errors.Is(err, ErrBadCredentials) {
@@ -219,7 +219,7 @@ func TestResetLinkDiesWithContactChange(t *testing.T) {
 	if _, err := s.RemoveContact(ctx, sess.User.ID, "email", strongPassword, ipA); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.CompleteLink(ctx, token, newPassword); !errors.Is(err, ErrInvalidLink) {
+	if _, err := s.CompleteLink(ctx, token, newPassword, "", ""); !errors.Is(err, ErrInvalidLink) {
 		t.Fatalf("err = %v", err)
 	}
 }
@@ -235,7 +235,7 @@ func TestResetClearsLockout(t *testing.T) {
 	failLogins(t, s, "kay", ipA, 5)
 	clock.advance(2 * time.Minute)
 	s.RequestPasswordReset(ctx, "kay", ipA)
-	if err := s.CompleteLink(ctx, lastLink(t, email, "kay@example.org"), newPassword); err != nil {
+	if _, err := s.CompleteLink(ctx, lastLink(t, email, "kay@example.org"), newPassword, "", ""); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := s.Login(ctx, "kay", newPassword, ipA); err != nil {

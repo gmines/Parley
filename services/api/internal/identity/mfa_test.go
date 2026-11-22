@@ -160,7 +160,7 @@ func TestMFAFailuresLockAndSurvivePasswordReset(t *testing.T) {
 	if err := s.RequestPasswordReset(ctx, "carl", ipA); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.CompleteLink(ctx, lastLink(t, email, addr), newPassword); err != nil {
+	if _, err := s.CompleteLink(ctx, lastLink(t, email, addr), newPassword, "", ""); err != nil {
 		t.Fatal(err)
 	}
 	code, _ := GenerateTOTP(secret, s.now())

@@ -22,6 +22,7 @@ export interface Features {
   email_recovery: boolean;
   sms_recovery: boolean;
   signup: boolean;
+  invites: boolean;
 }
 
 export type ContactKind = "email" | "phone";
@@ -222,6 +223,7 @@ export const api = {
   logout: () => invoke<void>("logout"),
 
   serverFeatures: (server: string) => invoke<Features>("server_features", { server }),
+  invite: (email: string) => invoke<void>("invite", { email }),
   requestPasswordReset: (server: string, identifier: string) =>
     invoke<void>("request_password_reset", { server, identifier }),
   fetchMe: () => invoke<User>("fetch_me"),

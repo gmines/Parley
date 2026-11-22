@@ -41,6 +41,11 @@ type RecoveryConfig struct {
 	ResetTTL            time.Duration // password reset links; default 30m
 	MaxSignupsPerIPHour int           // links issued per client address; default 20
 
+	// Invites lets a logged-in user invite another by email. Off by default;
+	// needs EmailEnabled. InviteDailyLimit caps invites per inviter per 24h.
+	InvitesEnabled   bool
+	InviteDailyLimit int // default 5
+
 	// SynchronousDelivery sends inline instead of in the background. For
 	// tests only: inline sending makes response time depend on whether the
 	// account exists.
@@ -72,6 +77,9 @@ func (c *RecoveryConfig) setDefaults() {
 	if c.MaxSignupsPerIPHour == 0 {
 		c.MaxSignupsPerIPHour = 20
 	}
+	if c.InviteDailyLimit == 0 {
+		c.InviteDailyLimit = 5
+	}
 }
 
 var (
@@ -98,11 +106,17 @@ type Features struct {
 	EmailRecovery bool `json:"email_recovery"`
 	SMSRecovery   bool `json:"sms_recovery"`
 	Signup        bool `json:"signup"`
+	Invites       bool `json:"invites"`
 }
 
 func (s *Service) Features() Features {
 	c := s.cfg().Recovery
-	return Features{EmailRecovery: c.EmailEnabled, SMSRecovery: c.SMSEnabled, Signup: c.EmailEnabled || c.SMSEnabled}
+	return Features{
+		EmailRecovery: c.EmailEnabled,
+		SMSRecovery:   c.SMSEnabled,
+		Signup:        c.EmailEnabled || c.SMSEnabled,
+		Invites:       c.EmailEnabled && c.InvitesEnabled,
+	}
 }
 
 func (s *Service) channelEnabled(channel string) (bool, error) {

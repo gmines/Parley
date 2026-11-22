@@ -350,7 +350,7 @@ export function accountView(
     api
       .serverFeatures(server)
       .then((f) => (features = f))
-      .catch(() => (features = { email_recovery: false, sms_recovery: false, signup: false }))
+      .catch(() => (features = { email_recovery: false, sms_recovery: false, signup: false, invites: false }))
       .finally(renderRecovery);
   }
   api.fetchMe().then(setUser).catch(() => {});

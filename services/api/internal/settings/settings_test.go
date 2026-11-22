@@ -176,3 +176,46 @@ func TestFormatDuration(t *testing.T) {
 		}
 	}
 }
+
+func TestInvitesGroup(t *testing.T) {
+	s := newStore(t)
+	ctx := context.Background()
+	base := identity.Runtime{
+		Recovery: identity.RecoveryConfig{AccountURL: "https://account.example.org", InviteDailyLimit: 5},
+	}
+
+	// Nothing stored: the base applies (invites off by default).
+	snap, _ := s.Load(ctx)
+	rt, problems := s.Resolve(base, snap)
+	if len(problems) != 0 || rt.Recovery.InvitesEnabled {
+		t.Fatalf("default should be off: %+v %v", rt.Recovery, problems)
+	}
+
+	// A bad limit is rejected.
+	var v *ValidationError
+	if err := s.PutInvites(ctx, Invites{Enabled: true, DailyLimit: 0}, "tester"); !errors.As(err, &v) {
+		t.Fatalf("zero limit while enabled accepted: %v", err)
+	}
+	if err := s.PutInvites(ctx, Invites{Enabled: true, DailyLimit: 10}, "tester"); err != nil {
+		t.Fatal(err)
+	}
+
+	snap, _ = s.Load(ctx)
+	if snap.Invites == nil || !snap.Invites.Enabled || snap.Invites.DailyLimit != 10 {
+		t.Fatalf("loaded invites = %+v", snap.Invites)
+	}
+	rt, problems = s.Resolve(base, snap)
+	if len(problems) != 0 || !rt.Recovery.InvitesEnabled || rt.Recovery.InviteDailyLimit != 10 {
+		t.Fatalf("resolved invites = %+v %v", rt.Recovery, problems)
+	}
+
+	// Reverting restores the deployment default.
+	if err := s.Revert(ctx, KeyInvites, "tester"); err != nil {
+		t.Fatal(err)
+	}
+	snap, _ = s.Load(ctx)
+	rt, _ = s.Resolve(base, snap)
+	if snap.Invites != nil || rt.Recovery.InvitesEnabled {
+		t.Fatalf("revert left invites on: %+v", rt.Recovery)
+	}
+}

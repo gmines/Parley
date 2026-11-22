@@ -63,6 +63,7 @@ func (s *Server) Handler() http.Handler {
 	authed.Handle("PUT /v1/users/me/{contact}", httpx.Handler(s.setContact))
 	authed.Handle("POST /v1/users/me/{contact}/verify", httpx.Handler(s.verifyContact))
 	authed.Handle("DELETE /v1/users/me/{contact}", httpx.Handler(s.removeContact))
+	authed.Handle("POST /v1/invites", httpx.Handler(s.invite))
 	authed.Handle("GET /v1/friends", httpx.Handler(s.listFriends))
 	authed.Handle("DELETE /v1/friends/{userID}", httpx.Handler(s.removeFriend))
 	authed.Handle("GET /v1/friends/requests", httpx.Handler(s.listRequests))
@@ -96,6 +97,7 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("/v1/auth/mfa/enroll/", auth.MiddlewareFunc(enrollOrFull, unauthorized)(enroll))
 	protected := auth.Middleware(s.Verifier, unauthorized)(authed)
 	mux.Handle("/v1/users/", protected)
+	mux.Handle("/v1/invites", protected)
 	mux.Handle("/v1/friends", protected)
 	mux.Handle("/v1/friends/", protected)
 	mux.Handle("/v1/blocks", protected)
@@ -192,6 +194,8 @@ func mapErr(err error) error {
 		identity.ErrInvalidChannel:     {http.StatusBadRequest, "invalid_channel"},
 		identity.ErrInvalidLink:        {http.StatusBadRequest, "invalid_link"},
 		identity.ErrContactRequired:    {http.StatusBadRequest, "contact_required"},
+		identity.ErrInvitesDisabled:    {http.StatusForbidden, "invites_disabled"},
+		identity.ErrInviteLimit:        {http.StatusTooManyRequests, "invite_limit"},
 		// 400, not 401: the client treats 401 as "refresh the token and retry".
 		identity.ErrInvalidMFACode:    {http.StatusBadRequest, "invalid_mfa_code"},
 		identity.ErrMFAChallenge:      {http.StatusBadRequest, "mfa_challenge_expired"},

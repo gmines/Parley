@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"log/slog"
 	"net/http"
 
 	"parley/pkg/httpx"
@@ -204,14 +205,41 @@ func (s *Server) completeLink(w http.ResponseWriter, r *http.Request) error {
 	var body struct {
 		Token       string `json:"token"`
 		NewPassword string `json:"new_password"`
+		// Only used for an invite, where the invitee picks their own.
+		Username    string `json:"username"`
+		DisplayName string `json:"display_name"`
 	}
 	if err := httpx.DecodeJSON(w, r, &body); err != nil {
 		return err
 	}
-	if err := s.Identity.CompleteLink(r.Context(), body.Token, body.NewPassword); err != nil {
+	res, err := s.Identity.CompleteLink(r.Context(), body.Token, body.NewPassword, body.Username, body.DisplayName)
+	if err != nil {
 		return mapErr(err)
 	}
+	// An invite makes the invitee and inviter friends. Best effort: the account
+	// is already active, so a failure here must not fail the request.
+	if res.InvitedBy != nil {
+		if err := s.Social.BefriendOnInvite(r.Context(), *res.InvitedBy, res.UserID); err != nil {
+			slog.ErrorContext(r.Context(), "invite befriend failed", "inviter", *res.InvitedBy, "invitee", res.UserID, "err", err)
+		}
+	}
 	w.WriteHeader(http.StatusNoContent)
+	return nil
+}
+
+// invite lets a logged-in user invite someone by email. The response is the
+// same whether or not a message was sent (see identity.Invite).
+func (s *Server) invite(w http.ResponseWriter, r *http.Request) error {
+	var body struct {
+		Email string `json:"email"`
+	}
+	if err := httpx.DecodeJSON(w, r, &body); err != nil {
+		return err
+	}
+	if err := s.Identity.Invite(r.Context(), caller(r), body.Email, s.clientIP(r)); err != nil {
+		return mapErr(err)
+	}
+	httpx.WriteJSON(w, http.StatusAccepted, map[string]string{"message": "Invitation sent."})
 	return nil
 }
 

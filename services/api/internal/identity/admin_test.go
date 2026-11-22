@@ -139,13 +139,13 @@ func TestAdminResetLinks(t *testing.T) {
 	if info, err := s.InspectLink(ctx, token); err != nil || info.Username != "dan" || info.Purpose != "reset_password" {
 		t.Fatalf("inspect: %+v %v", info, err)
 	}
-	if err := s.CompleteLink(ctx, token, "harbor-violet-engine-77"); err != nil {
+	if _, err := s.CompleteLink(ctx, token, "harbor-violet-engine-77", "", ""); err != nil {
 		t.Fatalf("complete admin link: %v", err)
 	}
 	if _, err := s.Login(ctx, "dan", "harbor-violet-engine-77", "10.0.0.1"); err != nil {
 		t.Fatalf("login with new password: %v", err)
 	}
-	if err := s.CompleteLink(ctx, token, "another-password-88"); !errors.Is(err, ErrInvalidLink) {
+	if _, err := s.CompleteLink(ctx, token, "another-password-88", "", ""); !errors.Is(err, ErrInvalidLink) {
 		t.Fatalf("admin link reused: %v", err)
 	}
 
@@ -164,7 +164,7 @@ func TestAdminResetLinks(t *testing.T) {
 	if _, err := s.AdminSetDisabled(ctx, withEmail.User.ID, true); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.CompleteLink(ctx, linkRe.FindStringSubmatch(url)[1], "harbor-violet-engine-77"); !errors.Is(err, ErrInvalidLink) {
+	if _, err := s.CompleteLink(ctx, linkRe.FindStringSubmatch(url)[1], "harbor-violet-engine-77", "", ""); !errors.Is(err, ErrInvalidLink) {
 		t.Fatalf("link for disabled account: %v", err)
 	}
 	if _, _, err := s.AdminCreateResetLink(ctx, withEmail.User.ID); !errors.Is(err, ErrAccountDisabled) {
@@ -295,7 +295,7 @@ func TestAdminCreateUser(t *testing.T) {
 	if _, err := s.Login(ctx, "ivy", strongPassword, ipA); !errors.Is(err, ErrBadCredentials) {
 		t.Fatalf("login before activation: %v", err)
 	}
-	if err := s.CompleteLink(ctx, linkRe.FindStringSubmatch(res.URL)[1], strongPassword); err != nil {
+	if _, err := s.CompleteLink(ctx, linkRe.FindStringSubmatch(res.URL)[1], strongPassword, "", ""); err != nil {
 		t.Fatalf("activate: %v", err)
 	}
 	if _, err := s.Login(ctx, "ivy", strongPassword, ipA); err != nil {
@@ -330,7 +330,7 @@ func TestAdminCreateUserDeliveryOff(t *testing.T) {
 	if res.Emailed {
 		t.Fatal("reported emailed with delivery off")
 	}
-	if err := s.CompleteLink(ctx, linkRe.FindStringSubmatch(res.URL)[1], strongPassword); err != nil {
+	if _, err := s.CompleteLink(ctx, linkRe.FindStringSubmatch(res.URL)[1], strongPassword, "", ""); err != nil {
 		t.Fatalf("activate handed-over link: %v", err)
 	}
 	if _, err := s.Login(ctx, "jack", strongPassword, ipA); err != nil {

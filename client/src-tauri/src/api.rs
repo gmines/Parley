@@ -40,6 +40,8 @@ pub struct Features {
     pub sms_recovery: bool,
     #[serde(default)]
     pub signup: bool,
+    #[serde(default)]
+    pub invites: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

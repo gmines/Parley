@@ -202,20 +202,28 @@ func (s *Service) RequestPasswordReset(ctx context.Context, identifier, clientIP
 }
 
 // LinkInfo is what the account page shows before asking for a password.
+// PickUsername is true for an invite: the account page then lets the invitee
+// choose their own username and display name instead of showing the current one.
 type LinkInfo struct {
-	Purpose  string `json:"purpose"`
-	Username string `json:"username"`
+	Purpose      string `json:"purpose"`
+	Username     string `json:"username"`
+	PickUsername bool   `json:"pick_username"`
 }
 
 // InspectLink describes a live link without using it, so a mail scanner
 // following the URL can't burn it.
 func (s *Service) InspectLink(ctx context.Context, token string) (LinkInfo, error) {
 	var info LinkInfo
-	err := s.pool.QueryRow(ctx, `SELECT l.purpose, u.username FROM account_links l JOIN users u ON u.id = l.user_id
+	err := s.pool.QueryRow(ctx, `SELECT l.purpose, u.username, l.invited_by IS NOT NULL
+		FROM account_links l JOIN users u ON u.id = l.user_id
 		WHERE l.token_hash = $1 AND l.consumed_at IS NULL AND l.expires_at > $2`,
-		hashToken(token), s.now()).Scan(&info.Purpose, &info.Username)
+		hashToken(token), s.now()).Scan(&info.Purpose, &info.Username, &info.PickUsername)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return LinkInfo{}, ErrInvalidLink
+	}
+	// An invite's username is a placeholder; don't surface it.
+	if info.PickUsername {
+		info.Username = ""
 	}
 	return info, err
 }
@@ -224,31 +232,53 @@ func (s *Service) InspectLink(ctx context.Context, token string) (LinkInfo, erro
 // link. Activation also verifies the address the link was sent to; a reset
 // signs out every session. A reset never touches MFA: the next login still
 // needs the second factor.
-func (s *Service) CompleteLink(ctx context.Context, token, newPassword string) error {
-	var notify *User
+func (s *Service) CompleteLink(ctx context.Context, token, newPassword, username, displayName string) (CompleteResult, error) {
+	var (
+		notify *User
+		result CompleteResult
+	)
 	err := pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
+		result = CompleteResult{}
 		var (
 			id                     uuid.UUID
 			purpose, channel, dest string
+			invitedBy              *uuid.UUID
 			u                      User
 		)
-		err := tx.QueryRow(ctx, `SELECT l.id, l.purpose, l.channel, l.destination, `+userCols("u")+`
+		err := tx.QueryRow(ctx, `SELECT l.id, l.purpose, l.channel, l.destination, l.invited_by, `+userCols("u")+`
 			FROM account_links l JOIN users u ON u.id = l.user_id
 			WHERE l.token_hash = $1 AND l.consumed_at IS NULL AND l.expires_at > $2
 			FOR UPDATE OF l, u`, hashToken(token), s.now()).
-			Scan(append([]any{&id, &purpose, &channel, &dest}, userDest(&u)...)...)
+			Scan(append([]any{&id, &purpose, &channel, &dest, &invitedBy}, userDest(&u)...)...)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return ErrInvalidLink
 		}
 		if err != nil {
 			return err
 		}
+		// An invite lets the invitee choose their own username and display
+		// name; for every other link the account's existing ones apply.
+		invite := invitedBy != nil && purpose == linkActivate
+		effUser, effName := u.Username, u.DisplayName
+		if invite {
+			effUser = NormalizeUsername(username)
+			if !validUsername(effUser) {
+				return ErrInvalidUsername
+			}
+			effName = strings.TrimSpace(displayName)
+			if effName == "" {
+				effName = effUser
+			}
+			if !validDisplayName(effName) {
+				return ErrInvalidDisplayName
+			}
+		}
 		// Argon2 runs only for a valid token, and a rejected password rolls
 		// back, leaving the link usable.
 		if !validPasswordLength(newPassword) {
 			return ErrInvalidPassword
 		}
-		if err := checkPasswordStrength(newPassword, u.Username, u.DisplayName); err != nil {
+		if err := checkPasswordStrength(newPassword, effUser, effName); err != nil {
 			return err
 		}
 		hash, err := hashPassword(newPassword, s.cfg().Hash)
@@ -258,13 +288,26 @@ func (s *Service) CompleteLink(ctx context.Context, token, newPassword string) e
 		col, verifiedCol, _ := contactColumns(channel)
 		switch purpose {
 		case linkActivate:
-			_, err := tx.Exec(ctx, fmt.Sprintf(`UPDATE users SET password_hash = $2, activated_at = $3, %s = $3
-				WHERE id = $1 AND %s = $4`, verifiedCol, col), u.ID, hash, s.now(), dest)
+			var err error
+			if invite {
+				_, err = tx.Exec(ctx, fmt.Sprintf(`UPDATE users SET username = $5, display_name = $6,
+					password_hash = $2, activated_at = $3, %s = $3 WHERE id = $1 AND %s = $4`, verifiedCol, col),
+					u.ID, hash, s.now(), dest, effUser, effName)
+				if db.IsUniqueViolation(err, "users_username_key") {
+					return ErrUsernameTaken
+				}
+			} else {
+				_, err = tx.Exec(ctx, fmt.Sprintf(`UPDATE users SET password_hash = $2, activated_at = $3, %s = $3
+					WHERE id = $1 AND %s = $4`, verifiedCol, col), u.ID, hash, s.now(), dest)
+			}
 			if db.IsUniqueViolation(err, "") {
 				return ErrContactInUse
 			}
 			if err != nil {
 				return err
+			}
+			if invite {
+				result = CompleteResult{InvitedBy: invitedBy, UserID: u.ID}
 			}
 		case linkReset:
 			if u.Disabled {
@@ -292,11 +335,22 @@ func (s *Service) CompleteLink(ctx context.Context, token, newPassword string) e
 			u.ID, purpose, s.now())
 		return err
 	})
-	if err == nil && notify != nil {
+	if err != nil {
+		return CompleteResult{}, err
+	}
+	if notify != nil {
 		s.notify(ctx, *notify, "Your password was changed",
 			"Your password was just reset and all devices were signed out. If this wasn't you, contact your server administrator.")
 	}
-	return err
+	return result, nil
+}
+
+// CompleteResult reports, for an invite activation, who sent the invite and the
+// new account's ID, so the caller can make them friends. Both are zero for a
+// plain activation or a password reset.
+type CompleteResult struct {
+	InvitedBy *uuid.UUID
+	UserID    uuid.UUID
 }
 
 // checkLinkRate enforces the resend interval and hourly cap per user and purpose.

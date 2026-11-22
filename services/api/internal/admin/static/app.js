@@ -470,6 +470,26 @@ async function settingsPage() {
       h("div", { class: "grid2" }, sessionsCard(), lockoutCard()),
       emailCard(),
       smsCard(),
+      invitesCard(),
+    );
+  }
+
+  function invitesCard() {
+    const v = s.invites.value;
+    const enabled = h("input", { type: "checkbox", checked: !!v.enabled });
+    const limit = h("input", { type: "number", min: "1", max: "100", value: v.daily_limit || 5 });
+    const err = h("p", { class: "error", role: "alert" });
+    const btn = h("button", {
+      class: "primary", text: "Save",
+      onclick: () => save(btn, err, "invites", { enabled: enabled.checked, daily_limit: Number(limit.value) }, "Invite settings saved."),
+    });
+    return h("section", { class: "card" },
+      ...groupHead("User invites", "invites"),
+      h("p", { class: "hint", text: "When on, signed-in users can invite others by email; the invitee chooses their own username. Needs email delivery enabled." }),
+      field("Enabled", enabled),
+      field("Daily limit per user", limit, "How many invites one user may send per 24 hours (1–100)."),
+      err,
+      h("div", { class: "actions" }, btn),
     );
   }
 

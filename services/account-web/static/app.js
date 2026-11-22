@@ -37,21 +37,37 @@
     if (!resp.ok) return finish("This link can't be used", await message(resp));
     const info = await resp.json();
     const activating = info.purpose === "activate";
-    $("title").textContent = activating ? "Activate your account" : "Choose a new password";
-    $("intro").textContent = "Choose a password for @" + info.username + ".";
+    const pickUsername = !!info.pick_username;
+    if (pickUsername) {
+      $("title").textContent = "Create your account";
+      $("intro").textContent = "You were invited to Parley. Choose a username and a password.";
+      $("namefields").hidden = false;
+    } else {
+      $("title").textContent = activating ? "Activate your account" : "Choose a new password";
+      $("intro").textContent = "Choose a password for @" + info.username + ".";
+    }
     $("form").hidden = false;
-    $("password").focus();
+    $(pickUsername ? "username" : "password").focus();
 
     $("form").addEventListener("submit", async (e) => {
       e.preventDefault();
       $("error").textContent = "";
+      if (pickUsername && !$("username").value.trim()) {
+        $("error").textContent = "Choose a username.";
+        return;
+      }
       if ($("password").value !== $("confirm").value) {
         $("error").textContent = "The passwords don't match.";
         return;
       }
       $("submit").disabled = true;
       try {
-        const done = await post("complete", { token, new_password: $("password").value });
+        const payload = { token, new_password: $("password").value };
+        if (pickUsername) {
+          payload.username = $("username").value.trim().toLowerCase();
+          payload.display_name = $("displayname").value.trim();
+        }
+        const done = await post("complete", payload);
         if (done.status === 204) {
           finish(
             activating ? "Your account is active" : "Password updated",
