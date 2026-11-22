@@ -102,7 +102,23 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("/v1/blocks/", protected)
 	mux.Handle("/v1/conversations", protected)
 	mux.Handle("/v1/conversations/", protected)
-	return mux
+	return securityHeaders(mux)
+}
+
+// securityHeaders sets baseline response headers for the public API. The API
+// serves only JSON (no HTML or scripts), so the CSP is maximally restrictive.
+// HSTS matters because parley.ezpzgo.com is reached directly (DNS-only, for
+// SIP), with no CDN in front to add it.
+func securityHeaders(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		h := w.Header()
+		h.Set("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
+		h.Set("X-Content-Type-Options", "nosniff")
+		h.Set("X-Frame-Options", "DENY")
+		h.Set("Content-Security-Policy", "default-src 'none'; frame-ancestors 'none'")
+		h.Set("Referrer-Policy", "no-referrer")
+		next.ServeHTTP(w, r)
+	})
 }
 
 // InternalHandler serves the account page's two operations, on a port no

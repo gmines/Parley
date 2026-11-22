@@ -14,8 +14,19 @@ import (
 // features are enabled. Public, so clients can call it before logging in.
 func (s *Server) meta(w http.ResponseWriter, r *http.Request) error {
 	f := s.Identity.Features()
+	// Expose version (and git commit for support), but not the Go runtime
+	// version: an unauthenticated endpoint shouldn't advertise it for CVE
+	// targeting.
+	bi := buildinfo.Get()
+	server := map[string]any{"version": bi.Version}
+	if bi.Commit != "" {
+		server["commit"] = bi.Commit
+	}
+	if bi.Modified {
+		server["modified"] = true
+	}
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{
-		"server":         buildinfo.Get(),
+		"server":         server,
 		"realtime_url":   s.RealtimeURL,
 		"voice_url":      s.VoiceURL,
 		"email_recovery": f.EmailRecovery,

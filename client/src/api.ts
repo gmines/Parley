@@ -184,7 +184,7 @@ export interface AppInfo {
 
 /** GET /v1/meta */
 export interface ServerMeta {
-  server?: { version: string; commit?: string; modified?: boolean; go_version: string };
+  server?: { version: string; commit?: string; modified?: boolean };
   realtime_url: string;
   email_recovery: boolean;
   sms_recovery: boolean;
