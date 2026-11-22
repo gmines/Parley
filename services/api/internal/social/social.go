@@ -206,6 +206,48 @@ func (s *Service) AcceptRequest(ctx context.Context, user, requestID uuid.UUID) 
 	return f, nil
 }
 
+// BefriendOnInvite makes the inviter and a freshly activated invitee friends.
+// It is idempotent (safe if they already are) and skips silently if either has
+// blocked the other. Called right after an invited account is activated.
+func (s *Service) BefriendOnInvite(ctx context.Context, inviter, invitee uuid.UUID) error {
+	if inviter == invitee {
+		return nil
+	}
+	var out []events.Event
+	err := pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
+		out = nil
+		if err := lockPair(ctx, tx, inviter, invitee); err != nil {
+			return err
+		}
+		aBlockedB, bBlockedA, err := blockState(ctx, tx, inviter, invitee)
+		if err != nil {
+			return err
+		}
+		if aBlockedB || bBlockedA {
+			return nil
+		}
+		since, err := insertFriendship(ctx, tx, inviter, invitee)
+		if err != nil {
+			return err
+		}
+		a, err := userByID(ctx, tx, inviter)
+		if err != nil {
+			return err
+		}
+		b, err := userByID(ctx, tx, invitee)
+		if err != nil {
+			return err
+		}
+		out = append(out, friendshipCreated(a, b, since)...)
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	s.publish(ctx, out)
+	return nil
+}
+
 // DeleteRequest declines an incoming request or cancels an outgoing one.
 func (s *Service) DeleteRequest(ctx context.Context, user, requestID uuid.UUID) error {
 	var from, to uuid.UUID

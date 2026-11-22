@@ -14,17 +14,25 @@ import (
 	"parley/pkg/auth"
 	"parley/pkg/httpx"
 	"parley/services/api/internal/identity"
+	"parley/services/api/internal/messaging"
 	"parley/services/api/internal/social"
 )
 
 type Server struct {
-	Identity *identity.Service
-	Social   *social.Service
-	Verifier *auth.Verifier
-	Pool     *pgxpool.Pool
+	Identity  *identity.Service
+	Social    *social.Service
+	Messaging *messaging.Service
+	Verifier  *auth.Verifier
+	Pool      *pgxpool.Pool
 	// TrustedProxies are the addresses (e.g. the ingress) whose
 	// X-Forwarded-For header is believed when determining the client IP.
 	TrustedProxies []netip.Prefix
+	// RealtimeURL is the WebSocket URL clients connect to for live events
+	// (served by the realtime service), advertised via GET /v1/meta.
+	RealtimeURL string
+	// VoiceURL is the base URL of the voice-control service (call join
+	// credentials), advertised via GET /v1/meta. Empty: same as the api.
+	VoiceURL string
 }
 
 func (s *Server) Handler() http.Handler {
@@ -34,20 +42,28 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
 	h("GET /readyz", s.ready)
 
-	h("POST /v1/auth/register", s.register)
+	h("POST /v1/auth/signup", s.signup)
 	h("POST /v1/auth/login", s.login)
 	h("POST /v1/auth/refresh", s.refresh)
 	h("POST /v1/auth/logout", s.logout)
+	h("GET /v1/meta", s.meta)
 	h("GET /v1/auth/features", s.features)
 	h("POST /v1/auth/password-reset/request", s.requestPasswordReset)
-	h("POST /v1/auth/password-reset/confirm", s.confirmPasswordReset)
+	h("POST /v1/auth/mfa/login", s.mfaLogin)
+
+	// All an enrollment-only token can reach.
+	enroll := http.NewServeMux()
+	enroll.Handle("POST /v1/auth/mfa/enroll/start", httpx.Handler(s.mfaEnrollStart))
+	enroll.Handle("POST /v1/auth/mfa/enroll/confirm", httpx.Handler(s.mfaEnrollConfirm))
 
 	authed := http.NewServeMux()
 	authed.Handle("GET /v1/users/me", httpx.Handler(s.me))
 	authed.Handle("POST /v1/users/me/password", httpx.Handler(s.changePassword))
+	authed.Handle("POST /v1/users/me/mfa/reset", httpx.Handler(s.mfaReset))
 	authed.Handle("PUT /v1/users/me/{contact}", httpx.Handler(s.setContact))
 	authed.Handle("POST /v1/users/me/{contact}/verify", httpx.Handler(s.verifyContact))
 	authed.Handle("DELETE /v1/users/me/{contact}", httpx.Handler(s.removeContact))
+	authed.Handle("POST /v1/invites", httpx.Handler(s.invite))
 	authed.Handle("GET /v1/friends", httpx.Handler(s.listFriends))
 	authed.Handle("DELETE /v1/friends/{userID}", httpx.Handler(s.removeFriend))
 	authed.Handle("GET /v1/friends/requests", httpx.Handler(s.listRequests))
@@ -57,16 +73,62 @@ func (s *Server) Handler() http.Handler {
 	authed.Handle("GET /v1/blocks", httpx.Handler(s.listBlocked))
 	authed.Handle("PUT /v1/blocks/{userID}", httpx.Handler(s.block))
 	authed.Handle("DELETE /v1/blocks/{userID}", httpx.Handler(s.unblock))
+	authed.Handle("GET /v1/conversations", httpx.Handler(s.listConversations))
+	authed.Handle("POST /v1/conversations/dm", httpx.Handler(s.openDM))
+	authed.Handle("POST /v1/conversations/group", httpx.Handler(s.createGroup))
+	authed.Handle("GET /v1/conversations/{convID}", httpx.Handler(s.getConversation))
+	authed.Handle("POST /v1/conversations/{convID}/members", httpx.Handler(s.addMembers))
+	authed.Handle("DELETE /v1/conversations/{convID}/members/me", httpx.Handler(s.leaveGroup))
+	authed.Handle("GET /v1/conversations/{convID}/messages", httpx.Handler(s.listMessages))
+	authed.Handle("POST /v1/conversations/{convID}/messages", httpx.Handler(s.sendMessage))
+	authed.Handle("POST /v1/conversations/{convID}/read", httpx.Handler(s.markRead))
 
 	unauthorized := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, r, httpx.ErrUnauthorized)
 	})
+	// Enrollment-only tokens (MFA required, not set up yet) and full ones
+	// (MFA optional for this account, and the user is opting in).
+	enrollOrFull := func(t string) (auth.Claims, error) {
+		if c, err := s.Verifier.VerifyEnrollment(t); err == nil {
+			return c, nil
+		}
+		return s.Verifier.Verify(t)
+	}
+	mux.Handle("/v1/auth/mfa/enroll/", auth.MiddlewareFunc(enrollOrFull, unauthorized)(enroll))
 	protected := auth.Middleware(s.Verifier, unauthorized)(authed)
 	mux.Handle("/v1/users/", protected)
+	mux.Handle("/v1/invites", protected)
 	mux.Handle("/v1/friends", protected)
 	mux.Handle("/v1/friends/", protected)
 	mux.Handle("/v1/blocks", protected)
 	mux.Handle("/v1/blocks/", protected)
+	mux.Handle("/v1/conversations", protected)
+	mux.Handle("/v1/conversations/", protected)
+	return securityHeaders(mux)
+}
+
+// securityHeaders sets baseline response headers for the public API. The API
+// serves only JSON (no HTML or scripts), so the CSP is maximally restrictive.
+// HSTS matters because parley.ezpzgo.com is reached directly (DNS-only, for
+// SIP), with no CDN in front to add it.
+func securityHeaders(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		h := w.Header()
+		h.Set("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
+		h.Set("X-Content-Type-Options", "nosniff")
+		h.Set("X-Frame-Options", "DENY")
+		h.Set("Content-Security-Policy", "default-src 'none'; frame-ancestors 'none'")
+		h.Set("Referrer-Policy", "no-referrer")
+		next.ServeHTTP(w, r)
+	})
+}
+
+// InternalHandler serves the account page's two operations, on a port no
+// ingress routes to. Neither does anything without a valid link token.
+func (s *Server) InternalHandler() http.Handler {
+	mux := http.NewServeMux()
+	mux.Handle("POST /internal/v1/links/inspect", httpx.Handler(s.inspectLink))
+	mux.Handle("POST /internal/v1/links/complete", httpx.Handler(s.completeLink))
 	return mux
 }
 
@@ -122,6 +184,7 @@ func mapErr(err error) error {
 		identity.ErrBadCredentials:     {http.StatusUnauthorized, "bad_credentials"},
 		identity.ErrInvalidRefresh:     {http.StatusUnauthorized, "invalid_refresh_token"},
 		identity.ErrUserNotFound:       {http.StatusNotFound, "user_not_found"},
+		identity.ErrAccountDisabled:    {http.StatusForbidden, "account_disabled"},
 		identity.ErrFeatureDisabled:    {http.StatusForbidden, "feature_disabled"},
 		identity.ErrInvalidEmail:       {http.StatusBadRequest, "invalid_email"},
 		identity.ErrInvalidPhone:       {http.StatusBadRequest, "invalid_phone"},
@@ -129,13 +192,34 @@ func mapErr(err error) error {
 		identity.ErrContactInUse:       {http.StatusConflict, "contact_in_use"},
 		identity.ErrTooManyCodes:       {http.StatusTooManyRequests, "too_many_codes"},
 		identity.ErrInvalidChannel:     {http.StatusBadRequest, "invalid_channel"},
-		social.ErrCannotSend:           {http.StatusBadRequest, "cannot_send_request"},
-		social.ErrSelf:                 {http.StatusBadRequest, "self"},
-		social.ErrAlreadyFriends:       {http.StatusConflict, "already_friends"},
-		social.ErrYouBlocked:           {http.StatusConflict, "you_blocked_user"},
-		social.ErrRequestNotFound:      {http.StatusNotFound, "request_not_found"},
-		social.ErrNotFriends:           {http.StatusNotFound, "not_friends"},
-		social.ErrUserNotFound:         {http.StatusNotFound, "user_not_found"},
+		identity.ErrInvalidLink:        {http.StatusBadRequest, "invalid_link"},
+		identity.ErrContactRequired:    {http.StatusBadRequest, "contact_required"},
+		identity.ErrInvitesDisabled:    {http.StatusForbidden, "invites_disabled"},
+		identity.ErrInviteLimit:        {http.StatusTooManyRequests, "invite_limit"},
+		// 400, not 401: the client treats 401 as "refresh the token and retry".
+		identity.ErrInvalidMFACode:    {http.StatusBadRequest, "invalid_mfa_code"},
+		identity.ErrMFAChallenge:      {http.StatusBadRequest, "mfa_challenge_expired"},
+		identity.ErrMFAAlreadyEnabled: {http.StatusConflict, "mfa_already_enabled"},
+		identity.ErrMFANotStarted:     {http.StatusConflict, "mfa_not_started"},
+		social.ErrCannotSend:          {http.StatusBadRequest, "cannot_send_request"},
+		social.ErrSelf:                {http.StatusBadRequest, "self"},
+		social.ErrAlreadyFriends:      {http.StatusConflict, "already_friends"},
+		social.ErrYouBlocked:          {http.StatusConflict, "you_blocked_user"},
+		social.ErrRequestNotFound:     {http.StatusNotFound, "request_not_found"},
+		social.ErrNotFriends:          {http.StatusNotFound, "not_friends"},
+		social.ErrUserNotFound:        {http.StatusNotFound, "user_not_found"},
+		messaging.ErrNotFound:         {http.StatusNotFound, "conversation_not_found"},
+		messaging.ErrNotFriends:       {http.StatusForbidden, "not_friends"},
+		messaging.ErrCannotMessage:    {http.StatusForbidden, "cannot_message"},
+		messaging.ErrSelf:             {http.StatusBadRequest, "self"},
+		messaging.ErrEmptyMessage:     {http.StatusBadRequest, "empty_message"},
+		messaging.ErrMessageTooLong:   {http.StatusBadRequest, "message_too_long"},
+		messaging.ErrGroupSize:        {http.StatusBadRequest, "group_size"},
+		messaging.ErrGroupName:        {http.StatusBadRequest, "group_name"},
+		messaging.ErrBadMessageID:     {http.StatusBadRequest, "bad_message_id"},
+		messaging.ErrNotGroup:         {http.StatusBadRequest, "not_group"},
+		messaging.ErrNoOneToAdd:       {http.StatusBadRequest, "no_one_to_add"},
+		messaging.ErrGroupFull:        {http.StatusConflict, "group_full"},
 	}
 	if locked := (*identity.LockedError)(nil); errors.As(err, &locked) {
 		e := httpx.NewError(http.StatusTooManyRequests, "too_many_attempts", locked.Error())

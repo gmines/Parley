@@ -1,0 +1,35 @@
+Parley is deployed.
+
+App server address: {{ include "parley.httpScheme" . }}://{{ .Values.host }}
+{{- if not .Values.ingress.tls.enabled }}
+  (plain http: logins and tokens travel unencrypted; LAN testing only)
+{{- end }}
+{{- if .Values.voice.enabled }}
+
+Voice runs on the node labelled {{ toJson .Values.voice.nodeSelector }}.
+If the voice pod stays Pending, label your media node:
+  kubectl label node <node> parley.chat/media=true
+
+Clients must reach that node on:
+{{- if .Values.voice.sip.tls.enabled }}
+  TCP {{ .Values.voice.sip.tls.port }} at {{ .Values.host }}                SIP over TLS (call setup)
+{{- end }}
+{{- if .Values.voice.sip.plain.enabled }}
+  TCP+UDP 5060 at {{ .Values.voice.advertiseAddress | default "the node's IP" }}            plain SIP (clients before 0.4; unencrypted)
+{{- end }}
+  UDP {{ .Values.voice.rtpPortStart }}-{{ .Values.voice.rtpPortEnd }} at {{ .Values.voice.advertiseAddress | default "the node's IP" }}    audio (SRTP)
+Open these in the node's firewall (and forward them on your router for
+callers outside your network).
+{{- end }}
+
+Check it:
+  kubectl -n {{ .Release.Namespace }} get pods -l app.kubernetes.io/instance={{ .Release.Name }}
+  curl {{ include "parley.httpScheme" . }}://{{ .Values.host }}/v1/meta
+{{- if .Values.admin.enabled }}
+
+Admin app (not exposed; reach it through a tunnel):
+  kubectl -n {{ .Release.Namespace }} port-forward deploy/{{ include "parley.name" . }}-admin 8090:8090
+  then open http://localhost:8090
+First admin account:
+  kubectl -n {{ .Release.Namespace }} exec -it deploy/{{ include "parley.name" . }}-admin -- /api admin create <username>
+{{- end }}

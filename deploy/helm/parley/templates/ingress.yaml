@@ -1,0 +1,41 @@
+{{- if .Values.ingress.enabled }}
+{{- $base := include "parley.name" . }}
+{{- /* One hostname: clients only need the server address. */}}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ $base }}
+  labels:
+    {{- include "parley.labels" . | nindent 4 }}
+  {{- with .Values.ingress.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  {{- with .Values.ingress.className }}
+  ingressClassName: {{ . }}
+  {{- end }}
+  {{- if .Values.ingress.tls.enabled }}
+  tls:
+    - hosts: [{{ .Values.host | quote }}]
+      secretName: {{ default (printf "%s-tls" $base) .Values.ingress.tls.secretName }}
+  {{- end }}
+  rules:
+    - host: {{ required "host is required" .Values.host | quote }}
+      http:
+        paths:
+          - path: /v1/realtime
+            pathType: Prefix
+            backend:
+              service: { name: {{ $base }}-realtime, port: { name: http } }
+          {{- if .Values.voice.enabled }}
+          - path: /v1/calls
+            pathType: Prefix
+            backend:
+              service: { name: {{ $base }}-voice, port: { name: http } }
+          {{- end }}
+          - path: /
+            pathType: Prefix
+            backend:
+              service: { name: {{ $base }}-api, port: { name: http } }
+{{- end }}

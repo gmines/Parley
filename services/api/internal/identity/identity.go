@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync/atomic"
 	"time"
 	"unicode"
 	"unicode/utf8"
@@ -30,6 +31,7 @@ var (
 	ErrBadCredentials     = errors.New("invalid username or password")
 	ErrInvalidRefresh     = errors.New("invalid or expired refresh token")
 	ErrUserNotFound       = errors.New("user not found")
+	ErrAccountDisabled    = errors.New("this account has been disabled; contact your server administrator")
 )
 
 // User is an account as its owner sees it. Contact fields are only ever
@@ -43,32 +45,52 @@ type User struct {
 	EmailVerified bool      `json:"email_verified,omitempty"`
 	Phone         string    `json:"phone,omitempty"`
 	PhoneVerified bool      `json:"phone_verified,omitempty"`
+	MFAEnabled    bool      `json:"mfa_enabled"`
+	// MFARequired: until MFAEnabled, sessions can only enroll. From the
+	// user's mfa_policy and the server-wide "mfa" setting.
+	MFARequired bool `json:"mfa_required"`
+	Disabled    bool `json:"-"`
 }
 
 // userCols selects the User fields from a users table aliased as p.
 func userCols(p string) string {
 	return fmt.Sprintf(`%[1]s.id, %[1]s.username, %[1]s.display_name, %[1]s.created_at,
 		coalesce(%[1]s.email, ''), %[1]s.email_verified_at IS NOT NULL,
-		coalesce(%[1]s.phone, ''), %[1]s.phone_verified_at IS NOT NULL`, p)
+		coalesce(%[1]s.phone, ''), %[1]s.phone_verified_at IS NOT NULL,
+		%[1]s.mfa_enabled_at IS NOT NULL, `+mfaRequiredExpr+`, %[1]s.disabled_at IS NOT NULL`, p)
 }
+
+// mfaRequiredExpr decides whether an account (aliased %[1]s) must use MFA. The
+// server-wide setting is read in the same query so every User is current; a
+// missing row means required.
+const mfaRequiredExpr = `(%[1]s.mfa_policy = 'required' OR (%[1]s.mfa_policy = 'inherit' AND coalesce(
+		(SELECT (ss.value->>'require')::boolean FROM server_settings ss WHERE ss.key = 'mfa'), true)))`
 
 // userDest returns scan destinations matching userCols, followed by extra.
 func userDest(u *User, extra ...any) []any {
 	return append([]any{&u.ID, &u.Username, &u.DisplayName, &u.CreatedAt,
-		&u.Email, &u.EmailVerified, &u.Phone, &u.PhoneVerified}, extra...)
+		&u.Email, &u.EmailVerified, &u.Phone, &u.PhoneVerified, &u.MFAEnabled, &u.MFARequired, &u.Disabled}, extra...)
 }
 
-// Session is returned by Register, Login, Refresh and ChangePassword.
+// Session is returned by Login, Refresh and ChangePassword. If User.MFAEnabled
+// is false, AccessToken can only be used to enroll in MFA. If MFARequired is
+// set, it holds only the MFA fields: the login continues at CompleteMFALogin.
 type Session struct {
 	User             User      `json:"user"`
 	AccessToken      string    `json:"access_token"`
 	AccessExpiresAt  time.Time `json:"access_expires_at"`
 	RefreshToken     string    `json:"refresh_token"`
 	RefreshExpiresAt time.Time `json:"refresh_expires_at"`
+
+	MFARequired  bool      `json:"-"`
+	MFAToken     string    `json:"-"`
+	MFAExpiresAt time.Time `json:"-"`
 }
 
 type Config struct {
 	Signer     *auth.Signer
+	Verifier   *auth.Verifier // of Signer's key
+	MFAKey     []byte         // 32 bytes; seals TOTP secrets at rest
 	RefreshTTL time.Duration
 	Hash       HashParams
 	Lockout    LockoutConfig
@@ -77,18 +99,54 @@ type Config struct {
 
 type Service struct {
 	pool      *pgxpool.Pool
-	cfg       Config
-	dummyHash string // compared against when a username doesn't exist, to equalize timing
+	cfgp      atomic.Pointer[Config] // swapped whole by SetRuntime; see cfg
+	dummyHash string                 // compared against when a username doesn't exist, to equalize timing
 	now       func() time.Time
 }
 
 func NewService(pool *pgxpool.Pool, cfg Config) (*Service, error) {
+	if len(cfg.MFAKey) != 32 {
+		return nil, errors.New("identity: MFAKey must be 32 bytes")
+	}
 	dummy, err := hashPassword("parley-dummy-password", cfg.Hash)
 	if err != nil {
 		return nil, err
 	}
 	cfg.Recovery.setDefaults()
-	return &Service{pool: pool, cfg: cfg, dummyHash: dummy, now: time.Now}, nil
+	s := &Service{pool: pool, dummyHash: dummy, now: time.Now}
+	s.cfgp.Store(&cfg)
+	return s, nil
+}
+
+// cfg is the current configuration. Read it once per use: an operator can
+// replace it at any time (SetRuntime).
+func (s *Service) cfg() *Config { return s.cfgp.Load() }
+
+// Runtime is the part of Config an operator can change while the server runs
+// (the admin app's settings).
+type Runtime struct {
+	Lockout    LockoutConfig
+	Recovery   RecoveryConfig
+	RefreshTTL time.Duration
+	AccessTTL  time.Duration
+}
+
+// SetRuntime replaces the runtime-adjustable settings. Requests already in
+// flight finish with whichever configuration they read.
+func (s *Service) SetRuntime(r Runtime) {
+	next := *s.cfg()
+	next.Lockout, next.Recovery, next.RefreshTTL = r.Lockout, r.Recovery, r.RefreshTTL
+	next.Recovery.setDefaults()
+	if r.AccessTTL > 0 {
+		next.Signer.SetTTL(r.AccessTTL)
+	}
+	s.cfgp.Store(&next)
+}
+
+// Runtime returns the settings SetRuntime controls.
+func (s *Service) Runtime() Runtime {
+	c := s.cfg()
+	return Runtime{Lockout: c.Lockout, Recovery: c.Recovery, RefreshTTL: c.RefreshTTL, AccessTTL: c.Signer.TTL()}
 }
 
 func NormalizeUsername(s string) string { return strings.ToLower(strings.TrimSpace(s)) }
@@ -123,88 +181,6 @@ func validPasswordLength(p string) bool {
 	return n >= 8 && n <= 128
 }
 
-// Registration is a new account. Email and Phone are optional recovery
-// contacts, accepted only when that channel is enabled; each must then be
-// verified with a code before it can be used.
-type Registration struct {
-	Username    string
-	Password    string
-	DisplayName string
-	Email       string
-	Phone       string
-}
-
-func (s *Service) Register(ctx context.Context, in Registration) (Session, error) {
-	username := NormalizeUsername(in.Username)
-	if !validUsername(username) {
-		return Session{}, ErrInvalidUsername
-	}
-	if !validPasswordLength(in.Password) {
-		return Session{}, ErrInvalidPassword
-	}
-	displayName := strings.TrimSpace(in.DisplayName)
-	if displayName == "" {
-		displayName = username
-	}
-	if !validDisplayName(displayName) {
-		return Session{}, ErrInvalidDisplayName
-	}
-	email, phone, err := s.validateContacts(in.Email, in.Phone)
-	if err != nil {
-		return Session{}, err
-	}
-	if err := checkPasswordStrength(in.Password, username, displayName); err != nil {
-		return Session{}, err
-	}
-	hash, err := hashPassword(in.Password, s.cfg.Hash)
-	if err != nil {
-		return Session{}, err
-	}
-
-	var (
-		sess  Session
-		codes []pendingCode
-	)
-	err = pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
-		codes = nil
-		var u User
-		err := tx.QueryRow(ctx, `
-			INSERT INTO users (username, display_name, password_hash, email, phone) VALUES ($1, $2, $3, $4, $5)
-			RETURNING `+userCols("users"),
-			username, displayName, hash, nullable(email), nullable(phone),
-		).Scan(userDest(&u)...)
-		if db.IsUniqueViolation(err, "users_username_key") {
-			return ErrUsernameTaken
-		}
-		if err != nil {
-			return fmt.Errorf("insert user: %w", err)
-		}
-		if email != "" {
-			c, err := s.issueCode(ctx, tx, u, purposeVerifyEmail, channelEmail, email)
-			if err != nil {
-				return err
-			}
-			codes = append(codes, c)
-		}
-		if phone != "" {
-			c, err := s.issueCode(ctx, tx, u, purposeVerifyPhone, channelSMS, phone)
-			if err != nil {
-				return err
-			}
-			codes = append(codes, c)
-		}
-		sess, err = s.newSession(ctx, tx, u, uuid.New())
-		return err
-	})
-	if err != nil {
-		return Session{}, err
-	}
-	for _, c := range codes {
-		s.deliver(ctx, c)
-	}
-	return sess, nil
-}
-
 // Login checks credentials, subject to the lockout policy. clientIP is the
 // caller's address, used for per-IP lockout.
 func (s *Service) Login(ctx context.Context, username, password, clientIP string) (Session, error) {
@@ -219,7 +195,7 @@ func (s *Service) Login(ctx context.Context, username, password, clientIP string
 		u    User
 		hash string
 	)
-	err := s.pool.QueryRow(ctx, `SELECT `+userCols("u")+`, u.password_hash FROM users u WHERE u.username = $1`,
+	err := s.pool.QueryRow(ctx, `SELECT `+userCols("u")+`, u.password_hash FROM users u WHERE u.username = $1 AND u.activated_at IS NOT NULL`,
 		username).Scan(userDest(&u, &hash)...)
 	switch {
 	case errors.Is(err, pgx.ErrNoRows):
@@ -240,6 +216,13 @@ func (s *Service) Login(ctx context.Context, username, password, clientIP string
 	if err := s.clearFailures(ctx, keys); err != nil {
 		return Session{}, err
 	}
+	// Only after the password, so this doesn't reveal which accounts exist.
+	if u.Disabled {
+		return Session{}, ErrAccountDisabled
+	}
+	if u.MFAEnabled {
+		return s.challenge(u)
+	}
 	return s.newSession(ctx, s.pool, u, uuid.New())
 }
 
@@ -252,8 +235,15 @@ func (s *Service) loginFailed(ctx context.Context, keys []throttleKey) error {
 	return ErrBadCredentials
 }
 
+// RefreshRetryWindow is how long a client may retry a refresh whose
+// response it never got (sleep, a dropped connection, a timeout).
+const RefreshRetryWindow = 10 * time.Minute
+
 // Refresh exchanges a refresh token for a new session. Each refresh token is
-// single-use; reusing one revokes every token in its family.
+// single-use; reusing one revokes every token in its family, with one
+// exception: within RefreshRetryWindow, a token whose replacement has never
+// been used can be exchanged again (the client never received the
+// replacement), and that replacement is revoked instead.
 func (s *Service) Refresh(ctx context.Context, refreshToken string) (Session, error) {
 	var (
 		sess   Session
@@ -265,13 +255,14 @@ func (s *Service) Refresh(ctx context.Context, refreshToken string) (Session, er
 			u             User
 			expiresAt     time.Time
 			used, revoked *time.Time
+			replacedBy    *uuid.UUID
 		)
 		err := tx.QueryRow(ctx, `
-			SELECT t.id, t.family_id, t.expires_at, t.used_at, t.revoked_at, `+userCols("u")+`
+			SELECT t.id, t.family_id, t.expires_at, t.used_at, t.revoked_at, t.replaced_by, `+userCols("u")+`
 			FROM refresh_tokens t JOIN users u ON u.id = t.user_id
 			WHERE t.token_hash = $1
 			FOR UPDATE OF t`, hashToken(refreshToken),
-		).Scan(append([]any{&id, &family, &expiresAt, &used, &revoked}, userDest(&u)...)...)
+		).Scan(append([]any{&id, &family, &expiresAt, &used, &revoked, &replacedBy}, userDest(&u)...)...)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return ErrInvalidRefresh
 		}
@@ -282,16 +273,34 @@ func (s *Service) Refresh(ctx context.Context, refreshToken string) (Session, er
 			return ErrInvalidRefresh
 		}
 		if used != nil {
-			// Commit the revocation, then report failure.
-			reused = true
-			_, err := tx.Exec(ctx, `UPDATE refresh_tokens SET revoked_at = now()
-				WHERE family_id = $1 AND revoked_at IS NULL`, family)
+			retry := false
+			if replacedBy != nil && s.now().Sub(*used) <= RefreshRetryWindow {
+				// Revoke the replacement if it was never used; if it was, this is a replay.
+				tag, err := tx.Exec(ctx, `UPDATE refresh_tokens SET revoked_at = now()
+					WHERE id = $1 AND used_at IS NULL AND revoked_at IS NULL`, *replacedBy)
+				if err != nil {
+					return err
+				}
+				retry = tag.RowsAffected() == 1
+			}
+			if !retry {
+				// Commit the revocation, then report failure.
+				reused = true
+				_, err := tx.Exec(ctx, `UPDATE refresh_tokens SET revoked_at = now()
+					WHERE family_id = $1 AND revoked_at IS NULL`, family)
+				return err
+			}
+		}
+		var next uuid.UUID
+		sess, next, err = s.issue(ctx, tx, u, family)
+		if errors.Is(err, ErrAccountDisabled) {
+			return ErrInvalidRefresh // signs the client out; logging in says why
+		}
+		if err != nil {
 			return err
 		}
-		if _, err := tx.Exec(ctx, `UPDATE refresh_tokens SET used_at = now() WHERE id = $1`, id); err != nil {
-			return err
-		}
-		sess, err = s.newSession(ctx, tx, u, family)
+		_, err = tx.Exec(ctx, `UPDATE refresh_tokens SET used_at = coalesce(used_at, $2), replaced_by = $3 WHERE id = $1`,
+			id, s.now(), next)
 		return err
 	})
 	if err != nil {
@@ -343,7 +352,7 @@ func (s *Service) ChangePassword(ctx context.Context, userID uuid.UUID, current,
 	if err := checkPasswordStrength(next, u.Username, u.DisplayName); err != nil {
 		return Session{}, err
 	}
-	newHash, err := hashPassword(next, s.cfg.Hash)
+	newHash, err := hashPassword(next, s.cfg().Hash)
 	if err != nil {
 		return Session{}, err
 	}
@@ -404,20 +413,39 @@ func setPassword(ctx context.Context, tx pgx.Tx, u User, hash string) error {
 }
 
 func (s *Service) newSession(ctx context.Context, q db.Querier, u User, family uuid.UUID) (Session, error) {
-	access, accessExp, err := s.cfg.Signer.Sign(auth.Claims{UserID: u.ID, Username: u.Username})
+	sess, _, err := s.issue(ctx, q, u, family)
+	return sess, err
+}
+
+// issue creates a session in the token family and returns it with the new
+// refresh token's id.
+func (s *Service) issue(ctx context.Context, q db.Querier, u User, family uuid.UUID) (Session, uuid.UUID, error) {
+	// Every session, new or refreshed, is issued here, so this is where a
+	// disabled account stops and where MFA is enforced: no path can mint a
+	// full token for an account that must enroll and hasn't, including
+	// sessions that predate the requirement (their next refresh lands here).
+	if u.Disabled {
+		return Session{}, uuid.Nil, ErrAccountDisabled
+	}
+	sign := s.cfg().Signer.SignEnrollment
+	if u.MFAEnabled || !u.MFARequired {
+		sign = s.cfg().Signer.Sign
+	}
+	access, accessExp, err := sign(auth.Claims{UserID: u.ID, Username: u.Username})
 	if err != nil {
-		return Session{}, err
+		return Session{}, uuid.Nil, err
 	}
 	raw := make([]byte, 32)
 	if _, err := rand.Read(raw); err != nil {
-		return Session{}, err
+		return Session{}, uuid.Nil, err
 	}
 	refresh := base64.RawURLEncoding.EncodeToString(raw)
-	refreshExp := s.now().Add(s.cfg.RefreshTTL)
-	if _, err := q.Exec(ctx, `
-		INSERT INTO refresh_tokens (family_id, user_id, token_hash, expires_at) VALUES ($1, $2, $3, $4)`,
-		family, u.ID, hashToken(refresh), refreshExp); err != nil {
-		return Session{}, fmt.Errorf("insert refresh token: %w", err)
+	refreshExp := s.now().Add(s.cfg().RefreshTTL)
+	var id uuid.UUID
+	if err := q.QueryRow(ctx, `
+		INSERT INTO refresh_tokens (family_id, user_id, token_hash, expires_at) VALUES ($1, $2, $3, $4) RETURNING id`,
+		family, u.ID, hashToken(refresh), refreshExp).Scan(&id); err != nil {
+		return Session{}, uuid.Nil, fmt.Errorf("insert refresh token: %w", err)
 	}
 	return Session{
 		User:             u,
@@ -425,7 +453,7 @@ func (s *Service) newSession(ctx context.Context, q db.Querier, u User, family u
 		AccessExpiresAt:  accessExp,
 		RefreshToken:     refresh,
 		RefreshExpiresAt: refreshExp,
-	}, nil
+	}, id, nil
 }
 
 func hashToken(t string) []byte {

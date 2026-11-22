@@ -67,3 +67,17 @@ func verifyPassword(password, encoded string) (bool, error) {
 	got := argon2.IDKey([]byte(password), salt, p.Time, p.Memory, p.Threads, uint32(len(want)))
 	return subtle.ConstantTimeCompare(got, want) == 1, nil
 }
+
+// HashPassword, VerifyPassword and CheckPasswordStrength apply the account
+// password rules elsewhere (admin accounts).
+func HashPassword(password string, p HashParams) (string, error) { return hashPassword(password, p) }
+
+func VerifyPassword(password, encoded string) (bool, error) { return verifyPassword(password, encoded) }
+
+// CheckPasswordStrength enforces the length and strength rules for accounts.
+func CheckPasswordStrength(password string, userInputs ...string) error {
+	if !validPasswordLength(password) {
+		return ErrInvalidPassword
+	}
+	return checkPasswordStrength(password, userInputs...)
+}

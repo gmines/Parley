@@ -29,7 +29,7 @@ func setup(t *testing.T, names ...string) *fixture {
 	for _, n := range names {
 		var id uuid.UUID
 		if err := pool.QueryRow(context.Background(),
-			`INSERT INTO users (username, display_name, password_hash) VALUES ($1, $1, 'x') RETURNING id`, n,
+			`INSERT INTO users (username, display_name, password_hash, activated_at) VALUES ($1, $1, 'x', now()) RETURNING id`, n,
 		).Scan(&id); err != nil {
 			t.Fatal(err)
 		}
@@ -262,5 +262,34 @@ func TestBlock(t *testing.T) {
 	}
 	if err := f.svc.Block(ctx, alice, uuid.New()); !errors.Is(err, ErrUserNotFound) {
 		t.Fatalf("block unknown err = %v", err)
+	}
+}
+
+func TestBefriendOnInvite(t *testing.T) {
+	f := setup(t, "amy", "bob", "carol")
+	ctx := context.Background()
+
+	// Makes the pair friends and notifies both sides.
+	if err := f.svc.BefriendOnInvite(ctx, f.users["amy"], f.users["bob"]); err != nil {
+		t.Fatal(err)
+	}
+	if !f.friends(t, "amy", "bob") {
+		t.Fatal("not friends after invite")
+	}
+
+	// Idempotent.
+	if err := f.svc.BefriendOnInvite(ctx, f.users["amy"], f.users["bob"]); err != nil {
+		t.Fatalf("second call: %v", err)
+	}
+
+	// A block between them is respected (no friendship formed).
+	if err := f.svc.Block(ctx, f.users["carol"], f.users["amy"]); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.svc.BefriendOnInvite(ctx, f.users["amy"], f.users["carol"]); err != nil {
+		t.Fatal(err)
+	}
+	if f.friends(t, "amy", "carol") {
+		t.Fatal("befriended across a block")
 	}
 }

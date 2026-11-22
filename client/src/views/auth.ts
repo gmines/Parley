@@ -1,12 +1,15 @@
 import { api, errorMessage, type Features, type User } from "../api";
 import { h } from "../dom";
+import { versionLabel } from "./about";
 
 export interface AuthOptions {
   server: string | null;
   username?: string;
+  /** "Stay signed in" starts checked unless the user unchecked it last time. */
+  staySignedIn?: boolean;
   notice?: string;
   onAuthed: (u: User) => void;
-  onForgot: (server: string, username: string, features: Features) => void;
+  onForgot: (server: string, username: string) => void;
 }
 
 export const PASSWORD_HINT =
@@ -20,18 +23,26 @@ export function authView(opts: AuthOptions): HTMLElement {
   const server = input("server", "Server", "chat.example.org", opts.server ?? "");
   const username = input("username", "Username", "", opts.username ?? "");
   const displayName = input("display_name", "Display name (optional)", "", "");
-  const email = input("email", "Email (optional)", "you@example.org", "", "email");
-  const phone = input("phone", "Phone (optional)", "+15551234567", "", "tel");
+  const contact = input("contact", "Email", "you@example.org", "");
   const password = input("password", "Password", "", "", "password");
   username.input.autocomplete = "username";
-  for (const f of [displayName, email, phone]) f.input.required = false;
+  password.input.autocomplete = "current-password";
+  displayName.input.required = false;
+
+  const stay = h("input", { attrs: { type: "checkbox", id: "f-stay" } });
+  stay.checked = opts.staySignedIn ?? true;
+  const stayField = h(
+    "label",
+    { class: "check", attrs: { for: "f-stay", title: "Keeps you signed in on this computer (for 30 days without using Parley). Uncheck on a shared computer." } },
+    stay,
+    h("span", { text: "Stay signed in" }),
+  );
 
   const httpWarning = h("p", {
     class: "hint hint-warn",
     text: "This server address uses plain http. Your password will be sent unencrypted.",
   });
-  const contactHint = h("p", { class: "hint", text: "Optional. A verified email or phone lets you reset a forgotten password." });
-  const passwordHint = h("p", { class: "hint", text: PASSWORD_HINT });
+  const contactHint = h("p", { class: "hint", text: "We'll send a link to activate your account and choose a password." });
   const error = h("p", { class: "form-error", attrs: { role: "alert" } });
   const info = h("p", { class: "form-notice", attrs: { role: "status" }, text: opts.notice ?? "" });
   const submit = h("button", { class: "btn btn-primary btn-block", attrs: { type: "submit" } });
@@ -43,15 +54,20 @@ export function authView(opts: AuthOptions): HTMLElement {
     const reg = mode === "register";
     const anyRecovery = !!features && (features.email_recovery || features.sms_recovery);
     title.textContent = reg ? "Create an account" : "Welcome back";
-    submit.textContent = reg ? "Create account" : "Log in";
-    switchLink.textContent = reg ? "Already have an account? Log in" : "Need an account? Register";
+    submit.textContent = reg ? "Send activation link" : "Log in";
+    switchLink.textContent = reg ? "Already have an account? Log in" : "Need an account? Sign up";
+    switchLink.hidden = !reg && !features?.signup;
     displayName.field.hidden = !reg;
-    email.field.hidden = !(reg && features?.email_recovery);
-    phone.field.hidden = !(reg && features?.sms_recovery);
-    contactHint.hidden = !(reg && anyRecovery);
-    passwordHint.hidden = !reg;
+    contact.field.hidden = !reg;
+    contact.input.required = reg;
+    const both = features?.email_recovery && features?.sms_recovery;
+    (contact.field.firstChild as HTMLElement).textContent = both ? "Email or mobile number" : features?.sms_recovery ? "Mobile number" : "Email";
+    contact.input.placeholder = both ? "you@example.org or +15551234567" : features?.sms_recovery ? "+15551234567" : "you@example.org";
+    contactHint.hidden = !reg;
+    password.field.hidden = reg;
+    password.input.required = !reg;
+    stayField.hidden = reg;
     forgotLink.hidden = reg || !anyRecovery;
-    password.input.autocomplete = reg ? "new-password" : "current-password";
     httpWarning.hidden = !server.input.value.trim().toLowerCase().startsWith("http://");
   };
 
@@ -88,7 +104,7 @@ export function authView(opts: AuthOptions): HTMLElement {
     render();
   });
   forgotLink.addEventListener("click", () => {
-    if (features) opts.onForgot(server.input.value, username.input.value, features);
+    if (features) opts.onForgot(server.input.value, username.input.value);
   });
 
   const form = h(
@@ -101,14 +117,14 @@ export function authView(opts: AuthOptions): HTMLElement {
     httpWarning,
     username.field,
     displayName.field,
-    email.field,
-    phone.field,
+    contact.field,
     contactHint,
     password.field,
-    passwordHint,
+    stayField,
     error,
     submit,
     h("div", { class: "auth-links" }, switchLink, forgotLink),
+    versionFooter(),
   );
 
   form.addEventListener("submit", async (e) => {
@@ -117,18 +133,21 @@ export function authView(opts: AuthOptions): HTMLElement {
     info.textContent = "";
     submit.disabled = true;
     try {
-      const user =
-        mode === "login"
-          ? await api.login(server.input.value, username.input.value, password.input.value)
-          : await api.register(
-              server.input.value,
-              username.input.value,
-              password.input.value,
-              displayName.input.value,
-              email.field.hidden ? "" : email.input.value,
-              phone.field.hidden ? "" : phone.input.value,
-            );
-      opts.onAuthed(user);
+      if (mode === "register") {
+        const value = contact.input.value.trim();
+        const isEmail = value.includes("@");
+        await api.signup(server.input.value, username.input.value, displayName.input.value, isEmail ? value : "", isEmail ? "" : value);
+        mode = "login";
+        render();
+        info.textContent = `Check ${isEmail ? "your email" : "your text messages"} for a link to activate your account. It expires in 24 hours.`;
+        return;
+      }
+      const outcome = await api.login(server.input.value, username.input.value, password.input.value, stay.checked);
+      if (outcome.user) opts.onAuthed(outcome.user);
+      else {
+        const step = mfaStep(stay.checked, opts.onAuthed, () => step.replaceWith(form));
+        form.replaceWith(step);
+      }
     } catch (err) {
       error.textContent = errorMessage(err);
     } finally {
@@ -142,10 +161,52 @@ export function authView(opts: AuthOptions): HTMLElement {
   return h("main", { class: "auth-screen" }, form);
 }
 
+/** Second step of a login: an authenticator or recovery code. */
+function mfaStep(stay: boolean, onAuthed: (u: User) => void, onBack: () => void): HTMLElement {
+  const code = input("mfa_code", "Authenticator code", "123456", "");
+  code.input.autocomplete = "one-time-code";
+  const error = h("p", { class: "form-error", attrs: { role: "alert" } });
+  const submit = h("button", { class: "btn btn-primary btn-block", attrs: { type: "submit" }, text: "Verify" });
+  const back = h("button", { class: "link", attrs: { type: "button" }, text: "Back", on: { click: onBack } });
+  const form = h(
+    "form",
+    { class: "auth-card" },
+    h("div", { class: "brand brand-lg", text: "Parley" }),
+    h("h1", { text: "Two-factor authentication" }),
+    h("p", { class: "hint", text: "Enter the 6-digit code from your authenticator app. Lost it? Enter one of your recovery codes instead." }),
+    code.field,
+    error,
+    submit,
+    h("div", { class: "auth-links" }, back),
+  );
+  form.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    error.textContent = "";
+    submit.disabled = true;
+    try {
+      onAuthed(await api.mfaLogin(code.input.value, stay));
+    } catch (err) {
+      error.textContent = errorMessage(err);
+      code.input.select();
+    } finally {
+      submit.disabled = false;
+    }
+  });
+  queueMicrotask(() => code.input.focus());
+  return form;
+}
+
 export function input(name: string, label: string, placeholder: string, value: string, type = "text") {
   const el = h("input", { attrs: { name, type, placeholder, id: `f-${name}`, spellcheck: "false" } });
   el.value = value;
   el.required = true;
   const field = h("label", { class: "field", attrs: { for: `f-${name}` } }, h("span", { text: label }), el);
   return { field, input: el };
+}
+
+/** Small "Parley 0.2.0 (abc123)" line, so testers can tell builds apart before logging in. */
+function versionFooter(): HTMLElement {
+  const el = h("p", { class: "auth-version" });
+  api.appInfo().then((i) => (el.textContent = `Parley ${versionLabel(i)}`)).catch(() => {});
+  return el;
 }

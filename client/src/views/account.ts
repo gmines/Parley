@@ -12,6 +12,8 @@ export function accountView(
   server: string | null,
   onUser: (u: User) => void,
   onSignedOut: (message: string) => void,
+  onMfaReset: (u: User) => void,
+  onMfaSetup: (u: User) => void,
 ): HTMLElement {
   let user = initialUser;
   let features: Features | null = null;
@@ -21,7 +23,7 @@ export function accountView(
     "div",
     { class: "main" },
     h("header", { class: "main-header" }, h("h1", { text: "Account" })),
-    h("section", { class: "content settings" }, profileSection(), passwordSection(), recovery),
+    h("section", { class: "content settings" }, profileSection(), passwordSection(), mfaSection(), recovery, backgroundSection()),
   );
 
   function setUser(u: User) {
@@ -43,6 +45,41 @@ export function accountView(
       h("h2", { text: "Profile" }),
       h("dl", { class: "kv" }, h("dt", { text: "Display name" }), h("dd", { text: user.display_name }), h("dt", { text: "Username" }), h("dd", { text: `@${user.username}` })),
     );
+  }
+
+  /** "Keep Parley running when the window is closed" (this computer only). */
+  function backgroundSection() {
+    const box = h("input", { attrs: { type: "checkbox", id: "f-background" } });
+    const hint = h("p", { class: "hint" });
+    const section = h(
+      "section",
+      { class: "settings-section" },
+      h("h2", { text: "This computer" }),
+      h("label", { class: "check", attrs: { for: "f-background" } }, box, h("span", { text: "Keep Parley running when the window is closed" })),
+      hint,
+    );
+    section.hidden = true;
+    const mac = navigator.userAgent.includes("Mac");
+    const explain = (on: boolean) =>
+      (hint.textContent = on
+        ? mac
+          ? "You'll still get calls and messages. Click Parley in the Dock to bring it back; quit with Parley → Quit Parley (⌘Q)."
+          : "You'll still get calls and messages. Click the Parley icon in the system tray to bring it back, or right-click it to quit."
+        : "Closing the window quits Parley.");
+    api
+      .backgroundSetting()
+      .then((s) => {
+        if (!s.available) return; // no tray icon: closing always quits
+        box.checked = s.enabled;
+        explain(s.enabled);
+        section.hidden = false;
+      })
+      .catch(() => {});
+    box.addEventListener("change", () => {
+      explain(box.checked);
+      api.setBackground(box.checked).catch((e) => toast(errorMessage(e), "error"));
+    });
+    return section;
   }
 
   function passwordSection() {
@@ -78,6 +115,73 @@ export function accountView(
       }
     });
     return form;
+  }
+
+  function mfaSection() {
+    if (!user.mfa_enabled) {
+      // Only reachable when the server doesn't require MFA for this account.
+      return h(
+        "section",
+        { class: "settings-section" },
+        h("h2", { text: "Two-factor authentication" }),
+        h("p", { class: "hint", text: "Off. Turn it on to require a code from an authenticator app (Google Authenticator, Aegis, 1Password…) whenever you sign in." }),
+        h(
+          "div",
+          { class: "form-actions" },
+          h("button", { class: "btn btn-sm btn-primary", attrs: { type: "button" }, text: "Set up authenticator", on: { click: () => onMfaSetup(user) } }),
+        ),
+      );
+    }
+    const panel = h("div", { class: "contact-panel" });
+    const start = h("button", {
+      class: "btn btn-sm btn-ghost",
+      text: user.mfa_required ? "Replace authenticator" : "Replace or remove authenticator",
+      on: {
+        click: () => {
+          const password = input("mfa_pw", "Current password", "", "", "password");
+          password.input.autocomplete = "current-password";
+          const code = input("mfa_current", "Authenticator or recovery code", "", "");
+          code.input.autocomplete = "one-time-code";
+          const error = h("p", { class: "form-error", attrs: { role: "alert" } });
+          const go = h("button", { class: "btn btn-primary btn-sm", attrs: { type: "submit" }, text: "Continue" });
+          const form = h(
+            "form",
+            { class: "inline-form" },
+            h("p", {
+              class: "hint",
+              text: user.mfa_required
+                ? "This signs out all your devices and invalidates your recovery codes. You'll set up a new authenticator right away."
+                : "This signs out all your devices and invalidates your recovery codes. Two-factor stays off until you set it up again.",
+            }),
+            password.field,
+            code.field,
+            error,
+            h("div", { class: "form-actions" }, cancelBtn(panel), go),
+          );
+          form.addEventListener("submit", async (e) => {
+            e.preventDefault();
+            error.textContent = "";
+            go.disabled = true;
+            try {
+              onMfaReset(await api.mfaReset(password.input.value, code.input.value));
+            } catch (err) {
+              fail(err, error);
+              go.disabled = false;
+            }
+          });
+          panel.replaceChildren(form);
+          password.input.focus();
+        },
+      },
+    });
+    return h(
+      "section",
+      { class: "settings-section" },
+      h("h2", { text: "Two-factor authentication" }),
+      h("p", { class: "hint", text: "Your account is protected by an authenticator app." }),
+      h("div", { class: "form-actions" }, start),
+      panel,
+    );
   }
 
   function renderRecovery() {
@@ -246,7 +350,7 @@ export function accountView(
     api
       .serverFeatures(server)
       .then((f) => (features = f))
-      .catch(() => (features = { email_recovery: false, sms_recovery: false }))
+      .catch(() => (features = { email_recovery: false, sms_recovery: false, signup: false, invites: false }))
       .finally(renderRecovery);
   }
   api.fetchMe().then(setUser).catch(() => {});

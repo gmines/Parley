@@ -29,11 +29,11 @@ func lockPair(ctx context.Context, tx pgx.Tx, a, b uuid.UUID) error {
 
 func userByUsername(ctx context.Context, q db.Querier, username string) (UserRef, error) {
 	return scanUser(q.QueryRow(ctx,
-		`SELECT id, username, display_name FROM users WHERE username = lower(trim($1))`, username))
+		`SELECT id, username, display_name FROM users WHERE username = lower(trim($1)) AND activated_at IS NOT NULL`, username))
 }
 
 func userByID(ctx context.Context, q db.Querier, id uuid.UUID) (UserRef, error) {
-	return scanUser(q.QueryRow(ctx, `SELECT id, username, display_name FROM users WHERE id = $1`, id))
+	return scanUser(q.QueryRow(ctx, `SELECT id, username, display_name FROM users WHERE id = $1 AND activated_at IS NOT NULL`, id))
 }
 
 func scanUser(row pgx.Row) (UserRef, error) {

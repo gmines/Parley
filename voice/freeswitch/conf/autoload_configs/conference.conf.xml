@@ -1,0 +1,18 @@
+<configuration name="conference.conf" description="Call rooms">
+  <caller-controls>
+    <group name="none"/>
+  </caller-controls>
+  <profiles>
+    <profile name="parley">
+      <!-- Mix at 48 kHz (Opus full band); members never hear themselves. -->
+      <param name="rate" value="48000"/>
+      <param name="interval" value="20"/>
+      <param name="channels" value="1"/>
+      <!-- Don't gate quiet speech; clients do noise suppression. -->
+      <param name="energy-level" value="0"/>
+      <param name="comfort-noise" value="false"/>
+      <param name="caller-controls" value="none"/>
+      <param name="max-members" value="10"/>
+    </profile>
+  </profiles>
+</configuration>

@@ -3,24 +3,36 @@ import { avatar, confirmDialog, h, toast } from "../dom";
 
 type Tab = "all" | "pending" | "blocked" | "add";
 
-// Until the realtime service exists (milestone 2), lists refresh by polling.
-const POLL_MS = 15_000;
+// Realtime friend events trigger reload(); polling is only a safety net.
+const POLL_MS = 60_000;
 
 export interface FriendsView {
   el: HTMLElement;
   /** Called with the pending-incoming count whenever it changes (for the sidebar badge). */
   onPendingChange?: (n: number) => void;
+  /** Refetch everything (e.g. after a realtime friend event). */
+  reload(): void;
   dispose(): void;
 }
 
-/** onSignedOut is called if the session expires while the view is open. */
-export function friendsView(onSignedOut: (message: string) => void): FriendsView {
+/**
+ * onSignedOut is called if the session expires while the view is open;
+ * onMessage / onCall when the user clicks "Message" / "Call" on a friend.
+ */
+export function friendsView(
+  onSignedOut: (message: string) => void,
+  onMessage: (u: UserRef) => void,
+  onCall: (u: UserRef) => void,
+): FriendsView {
   let tab: Tab = "all";
   let friends: Friend[] = [];
   let requests: Requests = { incoming: [], outgoing: [] };
   let blocked: Blocked[] = [];
   let loaded = false;
   let lastAdd: { kind: "ok" | "error"; text: string } | null = null;
+  let lastInvite: { kind: "ok" | "error"; text: string } | null = null;
+  let invitesEnabled = false;
+  let featuresChecked = false;
 
   const tabBar = h("nav", { class: "tabs", attrs: { role: "tablist" } });
   const content = h("section", { class: "content" });
@@ -31,10 +43,23 @@ export function friendsView(onSignedOut: (message: string) => void): FriendsView
     content,
   );
 
-  const view: FriendsView = { el, dispose };
+  const view: FriendsView = { el, dispose, reload: () => void load() };
+
+  // Whether this server lets users invite others (checked once).
+  async function checkInvites() {
+    if (featuresChecked) return;
+    featuresChecked = true;
+    try {
+      const server = await api.savedServer();
+      if (server) invitesEnabled = !!(await api.serverFeatures(server)).invites;
+    } catch {
+      // Leave invites hidden if we can't tell.
+    }
+  }
 
   async function load() {
     try {
+      await checkInvites();
       [friends, requests, blocked] = await Promise.all([api.listFriends(), api.listRequests(), api.listBlocked()]);
       loaded = true;
       render();
@@ -121,6 +146,8 @@ export function friendsView(onSignedOut: (message: string) => void): FriendsView
           row(
             f.user,
             null,
+            actionBtn("Message", "btn-primary", () => onMessage(f.user)),
+            actionBtn("📞 Call", "btn-ok", () => onCall(f.user)),
             actionBtn("Remove", "btn-ghost", async () => {
               const ok = await confirmDialog(
                 `Remove ${f.user.display_name}?`,
@@ -212,8 +239,42 @@ export function friendsView(onSignedOut: (message: string) => void): FriendsView
       }
       await load();
     });
-    content.replaceChildren(form);
+    content.replaceChildren(...(invitesEnabled ? [form, inviteForm()] : [form]));
     input.focus();
+  }
+
+  function inviteForm() {
+    const email = h("input", {
+      attrs: { type: "email", placeholder: "name@example.org", "aria-label": "Email address", spellcheck: "false", autocomplete: "off" },
+    });
+    const send = h("button", { class: "btn btn-primary", text: "Send invite", attrs: { type: "submit" } });
+    const status = h("p", { class: lastInvite ? `add-status add-${lastInvite.kind}` : "add-status", text: lastInvite?.text ?? "" });
+    const form = h(
+      "form",
+      { class: "add-form" },
+      h("h2", { text: "Invite someone" }),
+      h("p", { class: "hint", text: "Invite a friend by email. They'll get a link to join Parley and pick a username, and you'll be added as friends." }),
+      h("div", { class: "add-row" }, email, send),
+      status,
+    );
+    form.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const addr = email.value.trim();
+      if (!addr) return;
+      send.disabled = true;
+      try {
+        await api.invite(addr);
+        lastInvite = { kind: "ok", text: `Invitation sent to ${addr}.` };
+        email.value = "";
+      } catch (err) {
+        if (["session_expired", "not_logged_in"].includes(errorCode(err) ?? "")) return handleError(err);
+        lastInvite = { kind: "error", text: errorMessage(err) };
+      } finally {
+        send.disabled = false;
+      }
+      render();
+    });
+    return form;
   }
 
   function blockBtn(user: UserRef) {

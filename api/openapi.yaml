@@ -11,41 +11,116 @@ info:
     Access tokens are short-lived Ed25519 JWTs; renew with /v1/auth/refresh.
     Refresh tokens are single-use. Presenting a used one revokes the whole
     session (stolen-token detection), so clients must store the new refresh
-    token from every refresh response.
+    token from every refresh response. The exception is a retry: for 10
+    minutes after a refresh, the old token can be refreshed again as long as
+    its replacement hasn't been used (the client never got the response);
+    that replacement is revoked.
 servers:
   - url: http://localhost:8080
 security:
   - bearer: []
 
 paths:
-  /v1/auth/register:
+  /v1/auth/signup:
     post:
       security: []
+      summary: Request a new account
+      description: |
+        Creates an inactive account and sends a link (valid 24 hours) to the
+        email or phone, where the owner chooses a password. Exactly one of
+        email and phone is required. An address already used by an account
+        gets the same 202 and no message. Usernames are public, so a taken
+        one answers 409.
       requestBody:
         required: true
         content:
           application/json:
             schema:
               type: object
-              required: [username, password]
+              required: [username]
               properties:
                 username: { type: string, pattern: '^[a-zA-Z0-9_.]{2,32}$', description: Stored lowercased }
-                password:
-                  type: string
-                  minLength: 8
-                  maxLength: 128
-                  description: |
-                    Must not be easy to guess (zxcvbn score >= 3): common passwords,
-                    sequences, keyboard patterns and passwords built from the
-                    username or display name are rejected with `weak_password`,
-                    whose message says why. No character-class rules.
                 display_name: { type: string, maxLength: 32, description: Defaults to username }
-                email: { type: string, description: 'Optional recovery email. Only accepted when email recovery is enabled (else 403 feature_disabled). A verification code is sent to it.' }
-                phone: { type: string, description: 'Optional recovery phone, E.164 (+15551234567). Only accepted when SMS recovery is enabled.' }
+                email: { type: string }
+                phone: { type: string, description: 'E.164, e.g. +15551234567' }
       responses:
-        '201': { $ref: '#/components/responses/Session' }
+        '202': { description: Accepted }
         '400': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
         '409': { $ref: '#/components/responses/Error' }
+        '429': { $ref: '#/components/responses/Error' }
+  /v1/auth/mfa/login:
+    post:
+      security: []
+      summary: Finish a login with an authenticator or recovery code
+      description: |
+        When an account has MFA, /v1/auth/login answers
+        `{mfa_required, mfa_token, mfa_expires_at}` instead of a session.
+        Present the token here within 5 minutes.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [mfa_token, code]
+              properties:
+                mfa_token: { type: string }
+                code: { type: string }
+      responses:
+        '200': { $ref: '#/components/responses/Session' }
+        '400': { $ref: '#/components/responses/Error' }
+        '429': { $ref: '#/components/responses/Error' }
+  /v1/auth/mfa/enroll/start:
+    post:
+      summary: Create an authenticator secret
+      description: |
+        Where MFA is required (`user.mfa_required`, from the account's policy
+        and the server default) and not set up (`user.mfa_enabled` false),
+        sessions carry an enrollment token, accepted only by these two
+        endpoints and rejected everywhere else. Accounts where MFA is optional
+        get full tokens, which these endpoints also accept (opting in).
+      responses:
+        '200': { description: 'JSON with secret and otpauth_uri' }
+        '401': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+  /v1/auth/mfa/enroll/confirm:
+    post:
+      summary: Turn on MFA with a first code
+      description: Revokes every other session. Answers a full session plus `recovery_codes`, shown only here.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [code]
+              properties:
+                code: { type: string }
+      responses:
+        '200': { description: 'A session plus recovery_codes' }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+        '429': { $ref: '#/components/responses/Error' }
+  /v1/users/me/mfa/reset:
+    post:
+      summary: Remove the authenticator so a new one can be enrolled
+      description: Needs the password and a current or recovery code. Revokes all sessions and answers an enrollment session.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [password, code]
+              properties:
+                password: { type: string }
+                code: { type: string }
+      responses:
+        '200': { $ref: '#/components/responses/Session' }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
   /v1/auth/login:
     post:
       security: []
@@ -65,9 +140,12 @@ paths:
         IPs lock the account (configurable; see services/api/config.go). Locked
         requests get 429 `too_many_attempts` with a Retry-After header, even
         with the right password. Unknown usernames are counted the same way.
+        An account an administrator disabled gets 403 `account_disabled`
+        (only after the right password); its refresh tokens are rejected.
       responses:
         '200': { $ref: '#/components/responses/Session' }
         '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
         '429': { $ref: '#/components/responses/Error' }
   /v1/auth/refresh:
     post:
@@ -106,49 +184,27 @@ paths:
                 properties:
                   email_recovery: { type: boolean }
                   sms_recovery: { type: boolean }
+                  signup: { type: boolean }
   /v1/auth/password-reset/request:
     post:
       security: []
-      summary: Send a password reset code
+      summary: Send a password reset link
       description: |
-        Sends a 6-digit code (valid 15 minutes, 5 guesses) to the account's
-        *verified* email or phone. Always answers 202, whether or not the
-        account exists, has that contact, or is rate limited (1 code per
-        minute, 5 per hour), so it can't be used to probe accounts.
-        403 `feature_disabled` if the channel isn't enabled.
+        Sends a link (valid 30 minutes) to the account's verified email or
+        phone; the new password is chosen on the account page. A reset never
+        removes MFA. Always answers 202, whether or not the account exists or
+        is rate limited, so it can't be used to probe accounts.
       requestBody:
         required: true
         content:
           application/json:
             schema:
               type: object
-              required: [username, channel]
+              required: [identifier]
               properties:
-                username: { type: string }
-                channel: { type: string, enum: [email, sms] }
+                identifier: { type: string, description: 'Username, email or phone' }
       responses:
         '202': { description: Accepted }
-        '400': { $ref: '#/components/responses/Error' }
-        '403': { $ref: '#/components/responses/Error' }
-  /v1/auth/password-reset/confirm:
-    post:
-      security: []
-      summary: Set a new password with a reset code
-      description: Signs the account out everywhere and clears any login lockout. A weak new password (400 weak_password) leaves the code usable.
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              required: [username, code, new_password]
-              properties:
-                username: { type: string }
-                code: { type: string }
-                new_password: { type: string }
-      responses:
-        '204': { description: Password changed }
-        '400': { $ref: '#/components/responses/Error' }
         '403': { $ref: '#/components/responses/Error' }
 
   /v1/users/me/password:
@@ -228,6 +284,152 @@ paths:
           content: { application/json: { schema: { $ref: '#/components/schemas/User' } } }
         '400': { $ref: '#/components/responses/Error' }
         '409': { $ref: '#/components/responses/Error' }
+
+  /v1/meta:
+    get:
+      security: []
+      summary: Server metadata for clients
+      responses:
+        '200':
+          description: Realtime URL and enabled features
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  realtime_url: { type: string, description: 'WebSocket URL of the realtime service; empty means "<server>/v1/realtime"' }
+                  email_recovery: { type: boolean }
+                  sms_recovery: { type: boolean }
+
+  /v1/conversations:
+    get:
+      summary: Your conversations, most recently active first
+      responses:
+        '200':
+          description: Conversations
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  conversations: { type: array, items: { $ref: '#/components/schemas/Conversation' } }
+  /v1/conversations/dm:
+    post:
+      summary: Open (or create) the DM with a friend
+      description: Creating a DM requires being friends (403 not_friends). An existing DM can always be opened.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, required: [user_id], properties: { user_id: { type: string, format: uuid } } }
+      responses:
+        '200': { description: The DM, content: { application/json: { schema: { $ref: '#/components/schemas/Conversation' } } } }
+        '403': { $ref: '#/components/responses/Error' }
+  /v1/conversations/group:
+    post:
+      summary: Start a group DM with 2-9 friends
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [user_ids]
+              properties:
+                user_ids: { type: array, items: { type: string, format: uuid } }
+                name: { type: string, maxLength: 64 }
+      responses:
+        '201': { description: The group, content: { application/json: { schema: { $ref: '#/components/schemas/Conversation' } } } }
+        '400': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+  /v1/conversations/{convID}:
+    get:
+      parameters: [{ $ref: '#/components/parameters/ConvID' }]
+      responses:
+        '200': { description: The conversation, content: { application/json: { schema: { $ref: '#/components/schemas/Conversation' } } } }
+        '404': { $ref: '#/components/responses/Error' }
+  /v1/conversations/{convID}/members:
+    post:
+      summary: Add friends to a group
+      description: >
+        Any member can add their own friends, up to 10 people in all (409
+        group_full). People already in the group are skipped. New members see
+        the history, with nothing unread. DMs can't change members (400
+        not_group): start a group instead. Members get `conversation.updated`,
+        the new ones `conversation.created`.
+      parameters: [{ $ref: '#/components/parameters/ConvID' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, required: [user_ids], properties: { user_ids: { type: array, items: { type: string, format: uuid } } } }
+      responses:
+        '200': { description: The group, content: { application/json: { schema: { $ref: '#/components/schemas/Conversation' } } } }
+        '400': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+  /v1/conversations/{convID}/members/me:
+    delete:
+      summary: Leave a group
+      description: >
+        The last member to leave deletes the group. Your connections get
+        `conversation.removed`, the others `conversation.updated`. DMs can't be
+        left (400 not_group).
+      parameters: [{ $ref: '#/components/parameters/ConvID' }]
+      responses:
+        '204': { description: Left }
+        '400': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+  /v1/conversations/{convID}/messages:
+    parameters: [{ $ref: '#/components/parameters/ConvID' }]
+    get:
+      summary: Message history, ascending
+      description: The newest `limit` messages, or those strictly `before` / `after` a message id (ids sort by time).
+      parameters:
+        - { name: before, in: query, schema: { type: string, format: uuid } }
+        - { name: after, in: query, schema: { type: string, format: uuid } }
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 100, default: 50 } }
+      responses:
+        '200':
+          description: Messages
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  messages: { type: array, items: { $ref: '#/components/schemas/Message' } }
+        '404': { $ref: '#/components/responses/Error' }
+    post:
+      summary: Send a message
+      description: In a DM, a block in either direction makes this fail with 403 cannot_message.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [content]
+              properties:
+                content: { type: string, maxLength: 4000, description: Plain text; surrounding whitespace is trimmed }
+                nonce: { type: string, maxLength: 64, description: Client id echoed in the message.created event }
+      responses:
+        '201': { description: Sent, content: { application/json: { schema: { $ref: '#/components/schemas/Message' } } } }
+        '400': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+  /v1/conversations/{convID}/read:
+    post:
+      summary: Move your read marker forward
+      parameters: [{ $ref: '#/components/parameters/ConvID' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, required: [message_id], properties: { message_id: { type: string, format: uuid } } }
+      responses:
+        '204': { description: Marked }
+        '400': { $ref: '#/components/responses/Error' }
 
   /v1/friends:
     get:
@@ -338,6 +540,7 @@ components:
   parameters:
     UserID: { name: userID, in: path, required: true, schema: { type: string, format: uuid } }
     RequestID: { name: requestID, in: path, required: true, schema: { type: string, format: uuid } }
+    ConvID: { name: convID, in: path, required: true, schema: { type: string, format: uuid } }
   requestBodies:
     RefreshToken:
       required: true
@@ -367,6 +570,13 @@ components:
         email_verified: { type: boolean }
         phone: { type: string }
         phone_verified: { type: boolean }
+        mfa_enabled: { type: boolean, description: An authenticator app is set up }
+        mfa_required:
+          type: boolean
+          description: |
+            Must set up MFA before using the app. When true and mfa_enabled is
+            false, the session is enrollment-only. Absent on older servers,
+            where MFA was always required.
     UserRef:
       type: object
       properties:
@@ -393,6 +603,26 @@ components:
         from: { $ref: '#/components/schemas/UserRef' }
         to: { $ref: '#/components/schemas/UserRef' }
         created_at: { type: string, format: date-time }
+    Message:
+      type: object
+      properties:
+        id: { type: string, format: uuid, description: UUIDv7; sorts by time }
+        conversation_id: { type: string, format: uuid }
+        author: { oneOf: [{ $ref: '#/components/schemas/UserRef' }, { type: 'null' }] }
+        content: { type: string }
+        created_at: { type: string, format: date-time }
+        nonce: { type: string }
+    Conversation:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        kind: { type: string, enum: [dm, group] }
+        name: { type: string }
+        members: { type: array, items: { $ref: '#/components/schemas/UserRef' } }
+        created_at: { type: string, format: date-time }
+        last_message: { oneOf: [{ $ref: '#/components/schemas/Message' }, { type: 'null' }] }
+        last_read_message_id: { type: [string, 'null'], format: uuid }
+        unread_count: { type: integer, description: Capped at 100 }
     Blocked:
       type: object
       properties:
@@ -403,7 +633,8 @@ components:
       properties:
         code:
           type: string
-          examples: [invalid_username, weak_password, too_many_attempts, feature_disabled, invalid_email, invalid_phone,
+          examples: [conversation_not_found, cannot_message, empty_message, message_too_long, group_size, group_name, bad_message_id,
+                     invalid_username, weak_password, too_many_attempts, feature_disabled, invalid_email, invalid_phone,
                      invalid_code, contact_in_use, too_many_codes, invalid_channel, username_taken, bad_credentials, invalid_refresh_token,
                      cannot_send_request, already_friends, you_blocked_user, request_not_found,
                      not_friends, user_not_found, self, unauthorized, bad_request]

@@ -1,12 +1,12 @@
-# Builds the Parley desktop installers on each OS's own runner:
+# Builds the Parley desktop installers on each OS's own runner (including the
+# native voice engine, client/scripts/build-voice-deps.*):
 #   Linux   .deb, .rpm, .AppImage
 #   Windows setup .exe (NSIS) and .msi
 #   macOS   universal .dmg / .app (Apple Silicon + Intel)
 #
-# Push a tag like `client-v0.1.0` to build and attach the installers to a
-# *draft* GitHub release (publish it by hand after checking it). Run the
-# workflow manually ("Run workflow") to just build and download the
-# installers from the run's artifacts.
+# Push a tag like `client-v0.1.0` to build the installers and publish them as
+# a GitHub pre-release. Run the workflow manually ("Run workflow") to just
+# build and download the installers from the run's artifacts.
 #
 # Code signing is not configured yet, so Windows SmartScreen and macOS
 # Gatekeeper will warn on first launch. See the commented env blocks below.
@@ -18,7 +18,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write # create the draft release
+  contents: write # create the release
 
 jobs:
   test:
@@ -47,7 +47,14 @@ jobs:
       - name: Linux build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev libdbus-1-dev patchelf
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev libdbus-1-dev libasound2-dev libssl-dev patchelf
+      - name: Cache voice libraries
+        uses: actions/cache@v6
+        with:
+          path: client/.deps
+          key: voice-deps-${{ runner.os }}-${{ hashFiles('client/scripts/build-voice-deps.*') }}
+      - name: Build voice libraries
+        run: client/scripts/build-voice-deps.sh && rm -rf client/.deps/*/src
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
@@ -77,7 +84,7 @@ jobs:
         include:
           - platform: ubuntu-22.04 # oldest supported glibc, so packages run on newer distros
             args: ""
-          - platform: windows-latest
+          - platform: windows-2022 # pinned: VS 2022 (v143 toolset) for the pjproject build
             args: ""
           - platform: macos-latest
             args: "--target universal-apple-darwin"
@@ -89,7 +96,31 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev libdbus-1-dev patchelf
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev libdbus-1-dev libasound2-dev libssl-dev patchelf
+      - uses: microsoft/setup-msbuild@v3
+        if: runner.os == 'Windows'
+
+      # Native voice engine: Opus + pjproject (see client/scripts/build-voice-deps.*).
+      - name: Cache voice libraries
+        uses: actions/cache@v6
+        with:
+          path: client/.deps
+          key: voice-deps-${{ runner.os }}-${{ hashFiles('client/scripts/build-voice-deps.*') }}
+      - name: Build voice libraries (Linux)
+        if: runner.os == 'Linux'
+        run: client/scripts/build-voice-deps.sh && rm -rf client/.deps/*/src
+      - name: Build voice libraries (macOS, both architectures for the universal app)
+        if: runner.os == 'macOS'
+        run: |
+          VOICE_DEPS_ARCH=arm64 client/scripts/build-voice-deps.sh
+          VOICE_DEPS_ARCH=x86_64 client/scripts/build-voice-deps.sh
+          rm -rf client/.deps/*/src
+      - name: Build voice libraries (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          client/scripts/build-voice-deps.ps1
+          Remove-Item -Recurse -Force client/.deps/*/src
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -105,6 +136,16 @@ jobs:
       - name: Install npm dependencies
         working-directory: client
         run: npm ci
+      # Runs the echo canceller with the app's settings (call tests use no
+      # sound device, which skips echo cancellation) and checks SIP over TLS
+      # is built in, on each platform's own build.
+      - name: Voice engine self-test (echo canceller, SIP over TLS)
+        working-directory: client
+        shell: bash
+        run: |
+          npm run build
+          cd src-tauri
+          cargo run --features voiceprobe --bin voiceprobe -- --selftest
 
       - uses: tauri-apps/tauri-action@v1.0.0
         env:
@@ -121,9 +162,25 @@ jobs:
           projectPath: client
           args: ${{ matrix.args }}
           uploadWorkflowArtifacts: true
-          # Only tag pushes create a (draft) release; manual runs just upload artifacts.
+          # Only tag pushes create a release; manual runs just upload artifacts.
           tagName: ${{ startsWith(github.ref, 'refs/tags/client-v') && github.ref_name || '' }}
           releaseName: "Parley ${{ github.ref_name }}"
-          releaseBody: "Desktop installers for Windows, macOS and Linux. Draft: check the downloads before publishing."
-          releaseDraft: true
+          releaseBody: |
+            Desktop installers for Parley.
+
+            - **Windows:** `Parley_*_x64-setup.exe` (installs for your user, no admin needed) or `.msi`
+            - **macOS:** `Parley_*_universal.dmg` (Apple Silicon and Intel, macOS 11+)
+            - **Linux:** `.deb` (Debian/Ubuntu), `.rpm` (Fedora/RHEL) or `.AppImage` (any distro)
+
+            These builds are not code-signed yet. Windows SmartScreen may say "Windows protected your PC": click **More info → Run anyway**. On macOS, if it says the app "is damaged" or "can't be opened", run `xattr -dr com.apple.quarantine /Applications/Parley.app` in Terminal, or right-click the app → **Open**.
+          releaseDraft: false
           prerelease: true
+
+      # macOS remembers keychain and microphone permissions per code
+      # signature; an unsigned app gets asked again on every access.
+      - name: Check the macOS app is signed
+        if: runner.os == 'macOS'
+        run: |
+          app=client/src-tauri/target/universal-apple-darwin/release/bundle/macos/Parley.app
+          codesign --verify --deep --strict --verbose=2 "$app"
+          codesign -d --entitlements - "$app" 2>&1 | grep -q com.apple.security.device.audio-input

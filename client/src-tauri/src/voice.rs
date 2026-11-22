@@ -1,0 +1,300 @@
+//! Voice calls in the app: gets join credentials from voice-control, drives
+//! the engine (voice_engine.rs), and forwards engine events to the UI as
+//! `voice-event` ({"type": "state", ...} or {"type": "media", ...}).
+
+use std::sync::Mutex;
+
+use reqwest::Method;
+use serde::Serialize;
+use serde_json::{json, Value};
+use tauri::{AppHandle, Emitter, State};
+use url::Url;
+
+use crate::commands::AppState;
+use crate::error::{AppError, Result};
+use crate::sounds::{self, Slot};
+use crate::voice_engine::{AudioTest, CallState, Device, Engine, EngineEvent, SipCredentials, Sound, Stats, Tone, ToneSound};
+
+#[derive(Default)]
+pub struct Voice {
+    state: Mutex<VoiceState>,
+}
+
+#[derive(Default, Clone, Serialize)]
+pub struct VoiceState {
+    /// Conversation whose call we're in (or joining).
+    conversation: Option<String>,
+    muted: bool,
+    deafened: bool,
+    /// In a call without a microphone (none found): others can't hear us
+    /// until one is selected.
+    listen_only: bool,
+}
+
+fn internal(e: impl std::fmt::Display) -> AppError {
+    AppError::Internal(e.to_string())
+}
+
+/// The engine, started on first use. Its events go to the UI.
+fn engine(app: &AppHandle) -> Result<&'static Engine> {
+    if let Some(e) = Engine::get() {
+        return Ok(e);
+    }
+    let app = app.clone();
+    Engine::start(false, 3, move |ev| match ev {
+        EngineEvent::Log { level, text } => match level {
+            0 | 1 => log::error!("voice: {text}"),
+            2 => log::warn!("voice: {text}"),
+            3 => log::info!("voice: {text}"),
+            _ => log::debug!("voice: {text}"),
+        },
+        EngineEvent::Call { state, status, reason } => {
+            if state == CallState::Ended {
+                if let Some(v) = tauri::Manager::try_state::<AppState>(&app) {
+                    let mut s = v.voice.state.lock().unwrap();
+                    s.conversation = None;
+                    s.listen_only = false;
+                }
+            }
+            let _ = app.emit("voice-event", json!({ "type": "state", "state": state, "status": status, "reason": reason }));
+        }
+        EngineEvent::Media { active } => {
+            let _ = app.emit("voice-event", json!({ "type": "media", "active": active }));
+        }
+    })
+    .map_err(AppError::Internal)
+}
+
+/// voice-control's base URL: advertised by the server (GET /v1/meta
+/// voice_url), or the server itself (single ingress).
+async fn voice_base(state: &AppState) -> Result<Url> {
+    let server = state.session.server().await?;
+    let meta: Value = state.session.public_get(&server, "v1/meta").await?;
+    match meta["voice_url"].as_str().filter(|u| !u.is_empty()) {
+        Some(u) => {
+            let mut url = Url::parse(u).map_err(|e| internal(format!("server sent a bad voice_url: {e}")))?;
+            if !url.path().ends_with('/') {
+                let p = format!("{}/", url.path());
+                url.set_path(&p);
+            }
+            Ok(url)
+        }
+        None => Ok(server),
+    }
+}
+
+fn conv_id(s: &str) -> Result<&str> {
+    let ok = s.len() == 36 && s.chars().all(|c| c.is_ascii_hexdigit() || c == '-');
+    ok.then_some(s).ok_or_else(|| internal("invalid conversation id"))
+}
+
+/// Joins the conversation's call (starting it if nobody's in it yet).
+/// Returns `call`, the call's state before we joined (null if we're starting
+/// it), and `listen_only` (joined without a microphone).
+#[tauri::command]
+pub async fn voice_join(app: AppHandle, state: State<'_, AppState>, conversation_id: String) -> Result<Value> {
+    let conv = conv_id(&conversation_id)?;
+    if let Some(current) = state.voice.state.lock().unwrap().conversation.clone() {
+        return Err(AppError::Api {
+            code: "already_in_call".into(),
+            message: if current == conv { "You're already in this call.".into() } else { "Leave your current call first.".into() },
+        });
+    }
+    let user = state.session.current_user().await.ok_or(AppError::NotLoggedIn)?;
+    let base = voice_base(&state).await?;
+    let eng = engine(&app)?;
+    // The server hands out a TLS proxy when we can use one.
+    let body = json!({ "transports": eng.transports() });
+    let resp: Value = state.session.call_at(&base, Method::POST, &format!("v1/calls/{conv}/join"), Some(body)).await?;
+    let creds: SipCredentials = serde_json::from_value(resp["sip"].clone()).map_err(internal)?;
+
+    {
+        let s = state.voice.state.lock().unwrap();
+        eng.set_mute(s.muted);
+        eng.set_deaf(s.deafened);
+    }
+    let listen_only = eng.join(&creds, &user.id).map_err(internal)?;
+    let mut s = state.voice.state.lock().unwrap();
+    s.conversation = Some(conv.to_string());
+    s.listen_only = listen_only;
+    Ok(json!({ "call": resp["call"], "listen_only": listen_only }))
+}
+
+#[tauri::command]
+pub fn voice_leave(state: State<'_, AppState>) {
+    if let Some(e) = Engine::get() {
+        e.leave();
+    }
+    let mut s = state.voice.state.lock().unwrap();
+    s.conversation = None;
+    s.listen_only = false;
+}
+
+/// Mute: stop sending the microphone.
+#[tauri::command]
+pub fn voice_set_mute(state: State<'_, AppState>, muted: bool) -> VoiceState {
+    let mut s = state.voice.state.lock().unwrap();
+    s.muted = muted;
+    apply(&s);
+    s.clone()
+}
+
+/// Deafen: stop playing others' audio. Independent of mute (#9).
+#[tauri::command]
+pub fn voice_set_deaf(state: State<'_, AppState>, deafened: bool) -> VoiceState {
+    let mut s = state.voice.state.lock().unwrap();
+    s.deafened = deafened;
+    apply(&s);
+    s.clone()
+}
+
+fn apply(s: &VoiceState) {
+    if let Some(e) = Engine::get() {
+        e.set_mute(s.muted);
+        e.set_deaf(s.deafened);
+    }
+}
+
+#[tauri::command]
+pub fn voice_status(state: State<'_, AppState>) -> VoiceState {
+    state.voice.state.lock().unwrap().clone()
+}
+
+#[tauri::command]
+pub fn voice_stats() -> Option<Stats> {
+    Engine::get().and_then(|e| e.stats())
+}
+
+#[derive(Serialize)]
+pub struct Devices {
+    devices: Vec<Device>,
+}
+
+#[tauri::command]
+pub fn voice_devices(app: AppHandle) -> Result<Devices> {
+    Ok(Devices { devices: engine(&app)?.devices() })
+}
+
+/// Selects audio devices by index (from voice_devices); null = system default.
+/// In a listen-only call, selecting a working microphone makes it a normal
+/// one (voice_status tells).
+#[tauri::command]
+pub fn voice_set_devices(app: AppHandle, state: State<'_, AppState>, capture: Option<i32>, playback: Option<i32>) -> Result<()> {
+    let eng = engine(&app)?;
+    let result = eng.set_devices(capture, playback).map_err(internal);
+    let mut s = state.voice.state.lock().unwrap();
+    if s.conversation.is_some() {
+        s.listen_only = eng.listen_only();
+    }
+    result
+}
+
+/// Microphone and output volume (0-1), each with a boost in dB (0 = off).
+#[tauri::command]
+pub fn voice_set_levels(app: AppHandle, mic: f32, boost_db: f32, output: f32, output_boost_db: f32) -> Result<()> {
+    let gain = |volume: f32, db: f32| volume.clamp(0.0, 1.0) * 10f32.powf(db.clamp(0.0, 20.0) / 20.0);
+    engine(&app)?.set_levels(gain(mic, boost_db), gain(output, output_boost_db));
+    Ok(())
+}
+
+/// A built-in sound, or "custom": the slot's imported file (sounds.rs).
+#[derive(serde::Deserialize)]
+#[serde(untagged)]
+pub enum Choice<T> {
+    Custom(CustomTag),
+    Builtin(T),
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CustomTag {
+    Custom,
+}
+
+/// Starts (or with null, stops) a ring tone: "ringback" while we're calling,
+/// "ring" for an incoming call, playing `sound` (null = the default for
+/// that tone) at `volume` (0-1). A custom sound that's gone or won't play
+/// falls back to the default. `playback` = device index, null = default.
+#[tauri::command]
+pub fn voice_tone(app: AppHandle, tone: Option<Tone>, sound: Option<Choice<ToneSound>>, volume: Option<f32>, playback: Option<i32>) -> Result<()> {
+    let eng = engine(&app)?;
+    let volume = volume.unwrap_or(1.0).clamp(0.0, 1.0);
+    let Some(tone) = tone else {
+        return eng.tone(None, 0.0, playback).map_err(internal);
+    };
+    let builtin = match sound {
+        Some(Choice::Builtin(s)) => s,
+        Some(Choice::Custom(_)) => {
+            let slot = if tone == Tone::Ring { Slot::Ring } else { Slot::Ringback };
+            match sounds::custom_path(&app, slot).map(|p| eng.tone_file(&p, volume, playback)) {
+                Some(Ok(())) => return Ok(()),
+                Some(Err(e)) => log::warn!("custom {slot:?} sound: {e}"),
+                None => {}
+            }
+            tone.default_sound()
+        }
+        None => tone.default_sound(),
+    };
+    eng.tone(Some(builtin), volume, playback).map_err(internal)
+}
+
+/// Plays a message notification sound once at `volume` (0-1): built-in, or
+/// "custom" (falling back to the default if that's gone or won't play).
+/// `playback` = device index, null = default.
+#[tauri::command]
+pub fn voice_notify(app: AppHandle, sound: Choice<Sound>, volume: f32, playback: Option<i32>) -> Result<()> {
+    let eng = engine(&app)?;
+    let volume = volume.clamp(0.0, 1.0);
+    let builtin = match sound {
+        Choice::Builtin(s) => s,
+        Choice::Custom(_) => {
+            match sounds::custom_path(&app, Slot::Message).map(|p| eng.notify_file(&p, volume, playback)) {
+                Some(Ok(())) => return Ok(()),
+                Some(Err(e)) => log::warn!("custom message sound: {e}"),
+                None => {}
+            }
+            Sound::Chime
+        }
+    };
+    eng.notify(builtin, volume, playback).map_err(internal)
+}
+
+/// Audio settings test: "meter" opens the microphone (see voice_mic_level),
+/// "loopback" also plays it back; null stops it.
+#[tauri::command]
+pub fn voice_audio_test(app: AppHandle, mode: Option<AudioTest>) -> Result<()> {
+    engine(&app)?.audio_test(mode).map_err(internal)
+}
+
+/// The microphone's level, 0-255.
+#[tauri::command]
+pub fn voice_mic_level(app: AppHandle) -> Result<i32> {
+    Ok(engine(&app)?.mic_level())
+}
+
+/// Declines a ringing call (the others' clients stop ringing for us).
+/// `reason`: "declined" (default) or "failed" (we tried to join and couldn't).
+#[tauri::command]
+pub async fn voice_decline(state: State<'_, AppState>, conversation_id: String, reason: Option<String>) -> Result<()> {
+    let conv = conv_id(&conversation_id)?;
+    let base = voice_base(&state).await?;
+    let body = reason.map(|r| json!({ "reason": r }));
+    state.session.call_empty_at(&base, Method::POST, &format!("v1/calls/{conv}/decline"), body).await
+}
+
+/// Calls in progress in your conversations (for resync after reconnecting).
+#[tauri::command]
+pub async fn voice_calls(state: State<'_, AppState>) -> Result<Value> {
+    let base = voice_base(&state).await?;
+    let mut v: Value = state.session.call_at(&base, Method::GET, "v1/calls", None).await?;
+    Ok(v["calls"].take())
+}
+
+/// Hangs up on app exit so others see us leave immediately.
+pub fn shutdown() {
+    if let Some(e) = Engine::get() {
+        e.leave();
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        e.shutdown();
+    }
+}

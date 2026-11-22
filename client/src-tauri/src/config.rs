@@ -9,6 +9,15 @@ use serde::{Deserialize, Serialize};
 pub struct Config {
     /// Last server the user logged in to.
     pub server_url: Option<String>,
+    /// Username last used on that server, to fill in the login form.
+    #[serde(default)]
+    pub username: Option<String>,
+    /// The "Stay signed in" choice (default yes).
+    #[serde(default)]
+    pub stay_signed_in: Option<bool>,
+    /// Closing the window keeps Parley running in the background (default yes).
+    #[serde(default)]
+    pub run_in_background: Option<bool>,
 }
 
 pub struct ConfigStore {
@@ -18,7 +27,10 @@ pub struct ConfigStore {
 
 impl ConfigStore {
     pub fn new(path: PathBuf) -> Self {
-        Self { path, lock: Mutex::new(()) }
+        Self {
+            path,
+            lock: Mutex::new(()),
+        }
     }
 
     pub fn load(&self) -> Config {

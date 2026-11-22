@@ -66,7 +66,7 @@ type throttleKey struct {
 }
 
 func (s *Service) throttleKeys(username, ip string) []throttleKey {
-	c := s.cfg.Lockout
+	c := s.cfg().Lockout
 	if c.MaxFailures <= 0 {
 		return nil
 	}
@@ -105,7 +105,7 @@ func (s *Service) checkLocked(ctx context.Context, keys []throttleKey) error {
 // recordFailure counts a failed attempt against every key and returns a
 // *LockedError if this failure tripped a lock.
 func (s *Service) recordFailure(ctx context.Context, keys []throttleKey) error {
-	c := s.cfg.Lockout
+	c := s.cfg().Lockout
 	var locked *LockedError
 	for _, k := range keys {
 		err := pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {

@@ -8,3 +8,5 @@
 # Tauri / Rust (client, later milestones)
 /client/**/target/
 /client/**/node_modules/
+/client/dist/
+/client/.deps/

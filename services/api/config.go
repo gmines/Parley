@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -11,6 +12,7 @@ import (
 
 	"parley/services/api/internal/delivery"
 	"parley/services/api/internal/identity"
+	"parley/services/api/internal/settings"
 )
 
 // Login lockout:
@@ -57,8 +59,10 @@ func lockoutConfig() (identity.LockoutConfig, error) {
 //	PARLEY_SMTP_HOST, PARLEY_SMTP_PORT (default 587), PARLEY_SMTP_USERNAME,
 //	PARLEY_SMTP_PASSWORD, PARLEY_SMTP_FROM, PARLEY_SMTP_TLS ("starttls" default, or "implicit")
 //	PARLEY_TWILIO_ACCOUNT_SID, PARLEY_TWILIO_AUTH_TOKEN, PARLEY_TWILIO_FROM
+//	PARLEY_ACCOUNT_PUBLIC_URL  base URL of the account page, used in sign-up and
+//	                           reset links; required when a channel is on
 func recoveryConfig() (identity.RecoveryConfig, error) {
-	var c identity.RecoveryConfig
+	c := identity.RecoveryConfig{AccountURL: os.Getenv("PARLEY_ACCOUNT_PUBLIC_URL")}
 
 	switch mode := envOr("PARLEY_RECOVERY_EMAIL", "off"); mode {
 	case "off":
@@ -93,7 +97,22 @@ func recoveryConfig() (identity.RecoveryConfig, error) {
 	default:
 		return c, fmt.Errorf(`PARLEY_RECOVERY_SMS must be "off", "twilio" or "log", got %q`, mode)
 	}
+	if c.EmailEnabled || c.SMSEnabled {
+		if err := settings.CheckAccountURL(c.AccountURL); err != nil {
+			return c, err
+		}
+	}
 	return c, nil
+}
+
+// mfaKey decodes PARLEY_MFA_KEY, a base64 32-byte key sealing TOTP secrets.
+// Losing it locks every user out of MFA.
+func mfaKey() ([]byte, error) {
+	k, err := base64.StdEncoding.DecodeString(os.Getenv("PARLEY_MFA_KEY"))
+	if err != nil || len(k) != 32 {
+		return nil, errors.New("PARLEY_MFA_KEY must be 32 bytes, base64 encoded (`api keygen` prints one)")
+	}
+	return k, nil
 }
 
 func smtpSender() (*delivery.SMTP, error) {

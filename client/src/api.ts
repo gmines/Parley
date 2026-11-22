@@ -1,6 +1,7 @@
 // Typed wrappers around the Rust commands in src-tauri/src/commands.rs.
 // The Rust core holds the tokens and talks to the server; this side only sees data.
 import { invoke } from "@tauri-apps/api/core";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
 export interface User {
   id: string;
@@ -11,16 +12,31 @@ export interface User {
   email_verified: boolean;
   phone: string;
   phone_verified: boolean;
+  mfa_enabled: boolean;
+  /** Must set up MFA before using the app (server policy). */
+  mfa_required: boolean;
 }
 
 /** Optional recovery flows the server has enabled. */
 export interface Features {
   email_recovery: boolean;
   sms_recovery: boolean;
+  signup: boolean;
+  invites: boolean;
 }
 
 export type ContactKind = "email" | "phone";
-export type ResetChannel = "email" | "sms";
+
+export interface LoginOutcome {
+  user: User | null;
+  mfa_required: boolean;
+}
+
+export interface MfaSetup {
+  secret: string;
+  qr: boolean[];
+  size: number;
+}
 
 export interface UserRef {
   id: string;
@@ -55,6 +71,126 @@ export interface SendResult {
   friendship?: Friend;
 }
 
+export interface Message {
+  id: string;
+  conversation_id: string;
+  author: UserRef | null; // null if the account was deleted
+  content: string;
+  created_at: string;
+  nonce?: string;
+}
+
+export interface Conversation {
+  id: string;
+  kind: "dm" | "group";
+  name?: string;
+  members: UserRef[];
+  created_at: string;
+  last_message: Message | null;
+  last_read_message_id: string | null;
+  unread_count: number; // capped at 100
+}
+
+/** An event pushed by the realtime service (see api/events.md). */
+export interface RealtimeEvent {
+  type: string;
+  data: any;
+}
+
+export type RealtimeState = "connecting" | "connected" | "disconnected" | "signed_out" | "mfa_required";
+
+export function onRealtimeEvent(fn: (e: RealtimeEvent) => void): Promise<UnlistenFn> {
+  return listen<RealtimeEvent>("realtime-event", (e) => fn(e.payload));
+}
+
+export function onRealtimeStatus(fn: (s: RealtimeState) => void): Promise<UnlistenFn> {
+  return listen<{ state: RealtimeState }>("realtime-status", (e) => fn(e.payload.state));
+}
+
+/** A call in progress (voice-control). */
+export interface Call {
+  conversation_id: string;
+  started_by: string;
+  started_at: string;
+  participants: string[]; // user ids
+}
+
+export interface VoiceStats {
+  codec: string;
+  clock_rate: number;
+  rtt_ms: number;
+  jitter_ms: number;
+  rx_packets: number;
+  rx_lost: number;
+  tx_packets: number;
+  tx_lost: number;
+  duration_s: number;
+  encrypted: boolean;
+}
+
+export interface VoiceStatus {
+  conversation: string | null;
+  muted: boolean;
+  deafened: boolean;
+  /** In the call without a microphone (none found). */
+  listen_only: boolean;
+}
+
+export type MessageSound = "chime" | "pop" | "ding" | "soft";
+/** Built-in ring tones (#13): for incoming calls, and while calling. */
+export type RingSound = "chirp" | "classic" | "trill" | "marimba" | "pulse";
+export type RingbackSound = "ringback" | "ringback_eu" | "ringback_uk" | "ringback_soft";
+/** Where a custom sound file is used. */
+export type SoundSlot = "ring" | "ringback" | "message";
+
+export interface AudioDevice {
+  index: number;
+  name: string;
+  inputs: number;
+  outputs: number;
+}
+
+export type VoiceCallState = "idle" | "calling" | "connecting" | "connected" | "ended";
+
+export type VoiceEvent =
+  | { type: "state"; state: VoiceCallState; status: number; reason: string }
+  | { type: "media"; active: boolean };
+
+export function onVoiceEvent(fn: (e: VoiceEvent) => void): Promise<UnlistenFn> {
+  return listen<VoiceEvent>("voice-event", (e) => fn(e.payload));
+}
+
+/** What the login form starts with. */
+export interface SavedLogin {
+  server: string | null;
+  username: string | null;
+  stay_signed_in: boolean;
+}
+
+/** This client build (see the About page). */
+export interface BackgroundSetting {
+  enabled: boolean;
+  /** False when a closed window couldn't be brought back (no tray icon). */
+  available: boolean;
+}
+
+export interface AppInfo {
+  version: string;
+  commit: string;
+  os: string;
+  arch: string;
+  tauri_version: string;
+  webview_version: string | null;
+}
+
+/** GET /v1/meta */
+export interface ServerMeta {
+  server?: { version: string; commit?: string; modified?: boolean };
+  realtime_url: string;
+  email_recovery: boolean;
+  sms_recovery: boolean;
+}
+
 export interface AppError {
   code: string;
   message: string;
@@ -73,18 +209,23 @@ export function errorCode(e: unknown): string | undefined {
 // Tauri maps camelCase argument names here to the snake_case Rust parameters.
 export const api = {
   savedServer: () => invoke<string | null>("saved_server"),
+  savedLogin: () => invoke<SavedLogin>("saved_login"),
   restoreSession: () => invoke<User | null>("restore_session"),
-  register: (server: string, username: string, password: string, displayName: string, email?: string, phone?: string) =>
-    invoke<User>("register", { server, username, password, displayName, email: email || null, phone: phone || null }),
-  login: (server: string, username: string, password: string) =>
-    invoke<User>("login", { server, username, password }),
+  signup: (server: string, username: string, displayName: string, email: string, phone: string) =>
+    invoke<void>("signup", { server, username, displayName, email: email || null, phone: phone || null }),
+  login: (server: string, username: string, password: string, staySignedIn: boolean) =>
+    invoke<LoginOutcome>("login", { server, username, password, staySignedIn }),
+  mfaLogin: (code: string, staySignedIn: boolean) => invoke<User>("mfa_login", { code, staySignedIn }),
+  mfaEnrollStart: () => invoke<MfaSetup>("mfa_enroll_start"),
+  mfaEnrollConfirm: (code: string) => invoke<{ user: User; recovery_codes: string[] }>("mfa_enroll_confirm", { code }),
+  mfaReset: (password: string, code: string) => invoke<User>("mfa_reset", { password, code }),
+  currentUser: () => invoke<User | null>("current_user"),
   logout: () => invoke<void>("logout"),
 
   serverFeatures: (server: string) => invoke<Features>("server_features", { server }),
-  requestPasswordReset: (server: string, username: string, channel: ResetChannel) =>
-    invoke<void>("request_password_reset", { server, username, channel }),
-  confirmPasswordReset: (server: string, username: string, code: string, newPassword: string) =>
-    invoke<void>("confirm_password_reset", { server, username, code, newPassword }),
+  invite: (email: string) => invoke<void>("invite", { email }),
+  requestPasswordReset: (server: string, identifier: string) =>
+    invoke<void>("request_password_reset", { server, identifier }),
   fetchMe: () => invoke<User>("fetch_me"),
   changePassword: (currentPassword: string, newPassword: string) =>
     invoke<User>("change_password", { currentPassword, newPassword }),
@@ -92,6 +233,63 @@ export const api = {
     invoke<void>("set_contact", { kind, value, password }),
   verifyContact: (kind: ContactKind, code: string) => invoke<User>("verify_contact", { kind, code }),
   removeContact: (kind: ContactKind, password: string) => invoke<User>("remove_contact", { kind, password }),
+
+  realtimeStart: () => invoke<void>("realtime_start"),
+  appInfo: () => invoke<AppInfo>("app_info"),
+  openLogs: () => invoke<void>("open_logs"),
+  backgroundSetting: () => invoke<BackgroundSetting>("background_setting"),
+  setBackground: (enabled: boolean) => invoke<void>("set_background", { enabled }),
+  serverMeta: (server: string) => invoke<ServerMeta>("server_meta", { server }),
+  listConversations: () => invoke<Conversation[]>("list_conversations"),
+  getConversation: (conversationId: string) => invoke<Conversation>("get_conversation", { conversationId }),
+  openDm: (userId: string) => invoke<Conversation>("open_dm", { userId }),
+  createGroup: (userIds: string[], name: string) => invoke<Conversation>("create_group", { userIds, name }),
+  addGroupMembers: (conversationId: string, userIds: string[]) =>
+    invoke<Conversation>("add_group_members", { conversationId, userIds }),
+  leaveGroup: (conversationId: string) => invoke<void>("leave_group", { conversationId }),
+  listMessages: (conversationId: string, opts: { before?: string; after?: string } = {}) =>
+    invoke<Message[]>("list_messages", { conversationId, before: opts.before ?? null, after: opts.after ?? null }),
+  sendMessage: (conversationId: string, content: string, nonce: string) =>
+    invoke<Message>("send_message", { conversationId, content, nonce }),
+  markRead: (conversationId: string, messageId: string) => invoke<void>("mark_read", { conversationId, messageId }),
+
+  /** call: the call before we joined (null if we started it); listen_only: joined without a microphone. */
+  voiceJoin: (conversationId: string) => invoke<{ call: Call | null; listen_only: boolean }>("voice_join", { conversationId }),
+  voiceLeave: () => invoke<void>("voice_leave"),
+  voiceSetMute: (muted: boolean) => invoke<VoiceStatus>("voice_set_mute", { muted }),
+  voiceSetDeaf: (deafened: boolean) => invoke<VoiceStatus>("voice_set_deaf", { deafened }),
+  voiceStatus: () => invoke<VoiceStatus>("voice_status"),
+  voiceStats: () => invoke<VoiceStats | null>("voice_stats"),
+  voiceDevices: () => invoke<{ devices: AudioDevice[] }>("voice_devices"),
+  voiceSetDevices: (capture: number | null, playback: number | null) =>
+    invoke<void>("voice_set_devices", { capture, playback }),
+  /** reason "failed": we tried to join and couldn't (the caller is told). */
+  voiceDecline: (conversationId: string, reason?: "declined" | "failed") =>
+    invoke<void>("voice_decline", { conversationId, reason: reason ?? null }),
+  /** mic and output 0-1, each boost 0 (off) to 15 dB. */
+  voiceSetLevels: (mic: number, boostDb: number, output: number, outputBoostDb: number) =>
+    invoke<void>("voice_set_levels", { mic, boostDb, output, outputBoostDb }),
+  /** Ring tone on its own output stream; null stops it. sound: a built-in one, "custom" (the
+   * imported file) or null (the default); volume 0-1; playback = device index, null = default. */
+  voiceTone: (tone: "ring" | "ringback" | null, sound: RingSound | RingbackSound | "custom" | null, volume: number, playback: number | null) =>
+    invoke<void>("voice_tone", { tone, sound, volume, playback }),
+  /** A message sound, played once. volume 0-1; playback = device index, null = default. */
+  voiceNotify: (sound: MessageSound | "custom", volume: number, playback: number | null) =>
+    invoke<void>("voice_notify", { sound, volume, playback }),
+  /** Imports an audio file (WAV, MP3, OGG, FLAC) as a slot's custom sound, replacing its
+   * current one. ms: its length as stored; trimmed: it was cut to the slot's maximum. */
+  soundImport: async (slot: SoundSlot, file: File) =>
+    invoke<{ ms: number; trimmed: boolean }>("sound_import", new Uint8Array(await file.arrayBuffer()), {
+      headers: { slot, ext: file.name.includes(".") ? file.name.split(".").pop()!.toLowerCase() : "" },
+    }),
+  soundRemove: (slot: SoundSlot) => invoke<void>("sound_remove", { slot }),
+  voiceAudioTest: (mode: "meter" | "loopback" | null) => invoke<void>("voice_audio_test", { mode }),
+  voiceMicLevel: () => invoke<number>("voice_mic_level"),
+  voiceCalls: () => invoke<Call[]>("voice_calls"),
+  /** Time since the last keyboard / mouse input (null where the OS won't say) and whether the screen is locked. */
+  systemIdle: () => invoke<{ seconds: number | null; locked: boolean }>("system_idle"),
+  /** Shows the window and flashes it, as for an incoming call. */
+  requestAttention: () => invoke<void>("request_attention"),
 
   listFriends: () => invoke<Friend[]>("list_friends"),
   removeFriend: (userId: string) => invoke<void>("remove_friend", { userId }),

@@ -36,6 +36,16 @@ type RecoveryConfig struct {
 	ResendInterval  time.Duration // minimum gap between codes; default 60s
 	MaxCodesPerHour int           // per user and purpose; default 5
 
+	AccountURL          string        // public base URL of the account page; required with a channel on
+	ActivationTTL       time.Duration // sign-up links; default 24h
+	ResetTTL            time.Duration // password reset links; default 30m
+	MaxSignupsPerIPHour int           // links issued per client address; default 20
+
+	// Invites lets a logged-in user invite another by email. Off by default;
+	// needs EmailEnabled. InviteDailyLimit caps invites per inviter per 24h.
+	InvitesEnabled   bool
+	InviteDailyLimit int // default 5
+
 	// SynchronousDelivery sends inline instead of in the background. For
 	// tests only: inline sending makes response time depend on whether the
 	// account exists.
@@ -58,6 +68,18 @@ func (c *RecoveryConfig) setDefaults() {
 	if c.MaxCodesPerHour == 0 {
 		c.MaxCodesPerHour = 5
 	}
+	if c.ActivationTTL == 0 {
+		c.ActivationTTL = 24 * time.Hour
+	}
+	if c.ResetTTL == 0 {
+		c.ResetTTL = 30 * time.Minute
+	}
+	if c.MaxSignupsPerIPHour == 0 {
+		c.MaxSignupsPerIPHour = 20
+	}
+	if c.InviteDailyLimit == 0 {
+		c.InviteDailyLimit = 5
+	}
 }
 
 var (
@@ -73,28 +95,36 @@ var (
 const (
 	channelEmail = "email"
 	channelSMS   = "sms"
+	channelAdmin = "admin" // a reset link an admin hands to the user directly
 
-	purposeVerifyEmail   = "verify_email"
-	purposeVerifyPhone   = "verify_phone"
-	purposeResetPassword = "reset_password"
+	purposeVerifyEmail = "verify_email"
+	purposeVerifyPhone = "verify_phone"
 )
 
 // Features tells clients which optional flows this server supports.
 type Features struct {
 	EmailRecovery bool `json:"email_recovery"`
 	SMSRecovery   bool `json:"sms_recovery"`
+	Signup        bool `json:"signup"`
+	Invites       bool `json:"invites"`
 }
 
 func (s *Service) Features() Features {
-	return Features{EmailRecovery: s.cfg.Recovery.EmailEnabled, SMSRecovery: s.cfg.Recovery.SMSEnabled}
+	c := s.cfg().Recovery
+	return Features{
+		EmailRecovery: c.EmailEnabled,
+		SMSRecovery:   c.SMSEnabled,
+		Signup:        c.EmailEnabled || c.SMSEnabled,
+		Invites:       c.EmailEnabled && c.InvitesEnabled,
+	}
 }
 
 func (s *Service) channelEnabled(channel string) (bool, error) {
 	switch channel {
 	case channelEmail:
-		return s.cfg.Recovery.EmailEnabled, nil
+		return s.cfg().Recovery.EmailEnabled, nil
 	case channelSMS:
-		return s.cfg.Recovery.SMSEnabled, nil
+		return s.cfg().Recovery.SMSEnabled, nil
 	}
 	return false, ErrInvalidChannel
 }
@@ -128,7 +158,7 @@ func normalizePhone(s string) (string, error) {
 func (s *Service) validateContacts(email, phone string) (string, string, error) {
 	var err error
 	if strings.TrimSpace(email) != "" {
-		if !s.cfg.Recovery.EmailEnabled {
+		if !s.cfg().Recovery.EmailEnabled {
 			return "", "", ErrFeatureDisabled
 		}
 		if email, err = normalizeEmail(email); err != nil {
@@ -136,7 +166,7 @@ func (s *Service) validateContacts(email, phone string) (string, string, error) 
 		}
 	}
 	if strings.TrimSpace(phone) != "" {
-		if !s.cfg.Recovery.SMSEnabled {
+		if !s.cfg().Recovery.SMSEnabled {
 			return "", "", ErrFeatureDisabled
 		}
 		if phone, err = normalizePhone(phone); err != nil {
@@ -275,104 +305,6 @@ func (s *Service) RemoveContact(ctx context.Context, userID uuid.UUID, channel, 
 	return s.GetUser(ctx, userID)
 }
 
-// Password reset (logged out) -----------------------------------------------------
-
-// RequestPasswordReset sends a reset code to the account's verified email or
-// phone. It reports success whether or not the account exists, has that
-// contact verified, or is rate limited, so it can't be used to probe accounts.
-func (s *Service) RequestPasswordReset(ctx context.Context, username, channel string) error {
-	enabled, err := s.channelEnabled(channel)
-	if err != nil {
-		return err
-	}
-	if !enabled {
-		return ErrFeatureDisabled
-	}
-	col, verifiedCol, _ := contactColumns(channel)
-
-	var code *pendingCode
-	err = pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
-		var (
-			u    User
-			dest string
-		)
-		err := tx.QueryRow(ctx, fmt.Sprintf(`SELECT %s, u.%s FROM users u WHERE u.username = $1 AND u.%s IS NOT NULL`,
-			userCols("u"), col, verifiedCol), NormalizeUsername(username)).Scan(userDest(&u, &dest)...)
-		if errors.Is(err, pgx.ErrNoRows) {
-			return nil
-		}
-		if err != nil {
-			return err
-		}
-		if err := s.checkCodeRate(ctx, tx, u.ID, purposeResetPassword); err != nil {
-			slog.InfoContext(ctx, "password reset rate limited", "user_id", u.ID)
-			return nil
-		}
-		c, err := s.issueCode(ctx, tx, u, purposeResetPassword, channel, dest)
-		code = &c
-		return err
-	})
-	if err != nil {
-		return err
-	}
-	if code != nil {
-		s.deliver(ctx, *code)
-	}
-	return nil
-}
-
-// ConfirmPasswordReset sets a new password using a reset code. On success all
-// sessions are revoked and any login lockout is cleared.
-func (s *Service) ConfirmPasswordReset(ctx context.Context, username, code, newPassword string) error {
-	if !s.cfg.Recovery.EmailEnabled && !s.cfg.Recovery.SMSEnabled {
-		return ErrFeatureDisabled
-	}
-	if !validPasswordLength(newPassword) {
-		return ErrInvalidPassword
-	}
-	var bad bool
-	err := pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
-		var u User
-		err := tx.QueryRow(ctx, `SELECT `+userCols("u")+` FROM users u WHERE u.username = $1`,
-			NormalizeUsername(username)).Scan(userDest(&u)...)
-		if errors.Is(err, pgx.ErrNoRows) {
-			return ErrInvalidCode
-		}
-		if err != nil {
-			return err
-		}
-		_, ok, err := s.consumeCode(ctx, tx, u.ID, purposeResetPassword, code)
-		if err != nil {
-			return err
-		}
-		if !ok {
-			bad = true
-			return nil // commit the attempt counter
-		}
-		// Checked only after the code, so it can't reveal whether the account
-		// exists. A weak password rolls back, leaving the code usable.
-		if err := checkPasswordStrength(newPassword, u.Username, u.DisplayName); err != nil {
-			return err
-		}
-		hash, err := hashPassword(newPassword, s.cfg.Hash)
-		if err != nil {
-			return err
-		}
-		if _, err := tx.Exec(ctx, `UPDATE one_time_codes SET consumed_at = now()
-			WHERE user_id = $1 AND purpose = $2 AND consumed_at IS NULL`, u.ID, purposeResetPassword); err != nil {
-			return err
-		}
-		return setPassword(ctx, tx, u, hash)
-	})
-	if err != nil {
-		return err
-	}
-	if bad {
-		return ErrInvalidCode
-	}
-	return nil
-}
-
 // Codes ------------------------------------------------------------------------
 
 type pendingCode struct {
@@ -382,7 +314,7 @@ type pendingCode struct {
 
 // checkCodeRate enforces the resend interval and hourly cap per user and purpose.
 func (s *Service) checkCodeRate(ctx context.Context, q db.Querier, userID uuid.UUID, purpose string) error {
-	c := s.cfg.Recovery
+	c := s.cfg().Recovery
 	now := s.now()
 	var (
 		lastHour int
@@ -416,7 +348,7 @@ func (s *Service) issueCode(ctx context.Context, tx pgx.Tx, u User, purpose, cha
 	if _, err := tx.Exec(ctx, `INSERT INTO one_time_codes
 		(id, user_id, purpose, channel, destination, code_hash, expires_at, created_at)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
-		id, u.ID, purpose, channel, dest, hashCode(id, code), now.Add(s.cfg.Recovery.CodeTTL), now); err != nil {
+		id, u.ID, purpose, channel, dest, hashCode(id, code), now.Add(s.cfg().Recovery.CodeTTL), now); err != nil {
 		return pendingCode{}, err
 	}
 	return pendingCode{channel: channel, msg: s.codeMessage(u, purpose, channel, dest, code)}, nil
@@ -441,7 +373,7 @@ func (s *Service) consumeCode(ctx context.Context, tx pgx.Tx, userID uuid.UUID, 
 	if err != nil {
 		return "", false, err
 	}
-	if attempts >= s.cfg.Recovery.MaxAttempts {
+	if attempts >= s.cfg().Recovery.MaxAttempts {
 		return "", false, nil
 	}
 	if subtle.ConstantTimeCompare(hashCode(id, strings.TrimSpace(code)), hash) != 1 {
@@ -458,24 +390,12 @@ func hashCode(id uuid.UUID, code string) []byte {
 }
 
 func (s *Service) codeMessage(u User, purpose, channel, dest, code string) delivery.Message {
-	app, mins := s.cfg.Recovery.AppName, int(s.cfg.Recovery.CodeTTL.Minutes())
-	var subject, body string
-	switch purpose {
-	case purposeResetPassword:
-		subject = fmt.Sprintf("Your %s password reset code", app)
-		body = fmt.Sprintf("Your %s password reset code for @%s is %s. It expires in %d minutes.\n\n"+
-			"If you didn't ask to reset your password, ignore this message. Your password has not been changed.",
-			app, u.Username, code, mins)
-		if channel == channelSMS {
-			body = fmt.Sprintf("%s password reset code: %s (expires in %d min). Don't share it with anyone.", app, code, mins)
-		}
-	default:
-		subject = fmt.Sprintf("Confirm your %s %s", app, map[string]string{channelEmail: "email address", channelSMS: "phone number"}[channel])
-		body = fmt.Sprintf("Your %s verification code for @%s is %s. It expires in %d minutes.\n\n"+
-			"If you didn't add this address to a %s account, ignore this message.", app, u.Username, code, mins, app)
-		if channel == channelSMS {
-			body = fmt.Sprintf("%s verification code: %s (expires in %d min). Don't share it with anyone.", app, code, mins)
-		}
+	app, mins := s.cfg().Recovery.AppName, int(s.cfg().Recovery.CodeTTL.Minutes())
+	subject := fmt.Sprintf("Confirm your %s %s", app, map[string]string{channelEmail: "email address", channelSMS: "phone number"}[channel])
+	body := fmt.Sprintf("Your %s verification code for @%s is %s. It expires in %d minutes.\n\n"+
+		"If you didn't add this address to a %s account, ignore this message.", app, u.Username, code, mins, app)
+	if channel == channelSMS {
+		body = fmt.Sprintf("%s verification code: %s (expires in %d min). Don't share it with anyone.", app, code, mins)
 	}
 	return delivery.Message{To: dest, Subject: subject, Body: body}
 }
@@ -483,9 +403,9 @@ func (s *Service) codeMessage(u User, purpose, channel, dest, code string) deliv
 // deliver sends a code. By default this happens in the background so response
 // times don't reveal whether a message was sent.
 func (s *Service) deliver(ctx context.Context, c pendingCode) {
-	sender := s.cfg.Recovery.Email
+	sender := s.cfg().Recovery.Email
 	if c.channel == channelSMS {
-		sender = s.cfg.Recovery.SMS
+		sender = s.cfg().Recovery.SMS
 	}
 	send := func() {
 		ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), time.Minute)
@@ -494,7 +414,7 @@ func (s *Service) deliver(ctx context.Context, c pendingCode) {
 			slog.ErrorContext(ctx, "code delivery failed", "channel", c.channel, "err", err)
 		}
 	}
-	if s.cfg.Recovery.SynchronousDelivery {
+	if s.cfg().Recovery.SynchronousDelivery {
 		send()
 		return
 	}

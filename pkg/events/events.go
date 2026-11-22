@@ -23,6 +23,15 @@ const (
 	FriendRequestRemoved = "friend_request.removed"
 	FriendshipCreated    = "friendship.created"
 	FriendshipRemoved    = "friendship.removed"
+	ConversationCreated  = "conversation.created"
+	ConversationRead     = "conversation.read"
+	ConversationUpdated  = "conversation.updated" // members changed
+	ConversationRemoved  = "conversation.removed" // you left it
+	MessageCreated       = "message.created"
+	CallStarted          = "call.started"  // first person joined: other members' clients ring
+	CallUpdated          = "call.updated"  // participants changed
+	CallEnded            = "call.ended"    // last person left
+	CallDeclined         = "call.declined" // a member declined to join
 )
 
 type Publisher interface {

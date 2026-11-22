@@ -1,0 +1,180 @@
+{{- if .Values.accountWeb.enabled }}
+{{- $base := include "parley.name" . }}
+{{- $name := printf "%s-account-web" $base }}
+{{- $host := required "accountWeb.host is required when accountWeb.enabled=true" .Values.accountWeb.host }}
+{{- if eq $host .Values.host }}{{ fail "accountWeb.host must differ from host: host has to stay DNS-only for SIP, while this page sits behind a proxy/WAF" }}{{ end }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "parley.labels" . | nindent 4 }}
+    {{- include "parley.selector" (list . "account-web") | nindent 4 }}
+spec:
+  replicas: {{ .Values.accountWeb.replicas }}
+  selector:
+    matchLabels:
+      {{- include "parley.selector" (list . "account-web") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "parley.labels" . | nindent 8 }}
+        {{- include "parley.selector" (list . "account-web") | nindent 8 }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      # Public-facing: no Kubernetes API credentials, no secrets, no volumes.
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      securityContext:
+        {{- include "parley.podSecurity" . | nindent 8 }}
+      containers:
+        - name: account-web
+          image: {{ include "parley.image" (list . "account-web") }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          env:
+            - name: PARLEY_LISTEN_ADDR
+              value: ":8080"
+            - name: PARLEY_ACCOUNT_API_URL
+              value: {{ printf "http://%s-api:8081" $base | quote }}
+            - name: PARLEY_ACCOUNT_HOST
+              value: {{ $host | quote }}
+          ports:
+            - { name: http, containerPort: 8080 }
+          readinessProbe:
+            httpGet: { path: /healthz, port: http }
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: { path: /healthz, port: http }
+            periodSeconds: 20
+          resources:
+            {{- toYaml .Values.accountWeb.resources | nindent 12 }}
+          securityContext:
+            {{- include "parley.containerSecurity" . | nindent 12 }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "parley.labels" . | nindent 4 }}
+spec:
+  selector:
+    {{- include "parley.selector" (list . "account-web") | nindent 4 }}
+  ports:
+    - { name: http, port: 8080, targetPort: http }
+{{- if .Values.accountWeb.ingress.enabled }}
+---
+{{- /* Its own hostname, and only the page's paths. */}}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "parley.labels" . | nindent 4 }}
+  annotations:
+    {{- with .Values.accountWeb.ingress.annotations }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+    {{- if .Values.accountWeb.originPull.enabled }}
+    traefik.ingress.kubernetes.io/router.tls.options: {{ printf "%s-%s@kubernetescrd" .Release.Namespace $name }}
+    {{- end }}
+spec:
+  {{- with .Values.ingress.className }}
+  ingressClassName: {{ . }}
+  {{- end }}
+  tls:
+    - hosts: [{{ $host | quote }}]
+      secretName: {{ default (printf "%s-tls" $name) .Values.accountWeb.ingress.tlsSecretName }}
+  rules:
+    - host: {{ $host | quote }}
+      http:
+        paths:
+          - path: /account/
+            pathType: Prefix
+            backend:
+              service: { name: {{ $name }}, port: { name: http } }
+{{- end }}
+{{- if .Values.accountWeb.originPull.enabled }}
+---
+{{- /* The server's IP is public (SIP needs it), so without this anyone could
+       reach the page directly and skip the WAF. Only clients holding
+       Cloudflare's origin-pull certificate can complete TLS for this host. */}}
+apiVersion: traefik.io/v1alpha1
+kind: TLSOption
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "parley.labels" . | nindent 4 }}
+spec:
+  minVersion: VersionTLS12
+  clientAuth:
+    secretNames:
+      - {{ required "accountWeb.originPull.caSecret is required when originPull.enabled=true" .Values.accountWeb.originPull.caSecret | quote }}
+    clientAuthType: RequireAndVerifyClientCert
+{{- end }}
+{{- if .Values.accountWeb.networkPolicy.enabled }}
+---
+# The page may be reached only from the ingress controller, and may reach only
+# the api's internal port (and DNS to find it). A compromised pod can't get to
+# Postgres, NATS, the voice stack or the internet.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "parley.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "parley.selector" (list . "account-web") | nindent 6 }}
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Values.accountWeb.networkPolicy.ingressNamespace }}
+          podSelector:
+            matchLabels:
+              {{- toYaml .Values.accountWeb.networkPolicy.ingressPodLabels | nindent 14 }}
+      ports:
+        - { protocol: TCP, port: 8080 }
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              {{- include "parley.selector" (list . "api") | nindent 14 }}
+      ports:
+        - { protocol: TCP, port: 8081 }
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - { protocol: UDP, port: 53 }
+        - { protocol: TCP, port: 53 }
+---
+# The public port stays open; the internal port answers only the account page.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ $base }}-api-internal
+  labels:
+    {{- include "parley.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "parley.selector" (list . "api") | nindent 6 }}
+  policyTypes: [Ingress]
+  ingress:
+    - ports:
+        - { protocol: TCP, port: 8080 }
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- include "parley.selector" (list . "account-web") | nindent 14 }}
+      ports:
+        - { protocol: TCP, port: 8081 }
+{{- end }}
+{{- end }}

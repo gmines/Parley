@@ -18,6 +18,17 @@ pub struct User {
     pub phone: String,
     #[serde(default)]
     pub phone_verified: bool,
+    /// Servers without MFA don't send this and don't require it.
+    #[serde(default = "default_true")]
+    pub mfa_enabled: bool,
+    /// Whether the account must set up MFA before using the app. Servers
+    /// that don't send it made MFA mandatory (when they had it at all).
+    #[serde(default = "default_true")]
+    pub mfa_required: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 /// Optional flows the server has enabled (GET /v1/auth/features).
@@ -27,6 +38,10 @@ pub struct Features {
     pub email_recovery: bool,
     #[serde(default)]
     pub sms_recovery: bool,
+    #[serde(default)]
+    pub signup: bool,
+    #[serde(default)]
+    pub invites: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -42,6 +57,29 @@ pub struct Session {
     pub access_token: String,
     pub access_expires_at: DateTime<Utc>,
     pub refresh_token: String,
+}
+
+/// POST /v1/auth/login: either a session or a request for the second factor.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+pub enum LoginResponse {
+    Challenge { mfa_token: String },
+    Session(Session),
+}
+
+/// POST /v1/auth/mfa/enroll/start
+#[derive(Debug, Clone, Deserialize)]
+pub struct MfaSecret {
+    pub secret: String,
+    pub otpauth_uri: String,
+}
+
+/// POST /v1/auth/mfa/enroll/confirm
+#[derive(Debug, Clone, Deserialize)]
+pub struct MfaEnrolled {
+    #[serde(flatten)]
+    pub session: Session,
+    pub recovery_codes: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
