@@ -52,7 +52,8 @@ Fetch "https://github.com/pjsip/pjproject/archive/refs/tags/$PjVersion.tar.gz" $
 New-Item -ItemType Directory -Force "$Work\pj" | Out-Null
 tar -xzf "$Work\pj.tgz" -C "$Work\pj" --strip-components=1
 @"
-/* Parley: audio-only SIP client (keep in sync with build-voice-deps.sh). */
+/* Parley: audio-only SIP client (keep in sync with build-voice-deps.sh,
+ * except the sound latency, which WMME needs larger). */
 #define PJMEDIA_HAS_VIDEO            0
 #define PJMEDIA_HAS_SRTP             1
 /* SIP over TLS with Windows' own TLS (Schannel) and certificate store. */
@@ -69,8 +70,11 @@ tar -xzf "$Work\pj.tgz" -C "$Work\pj" --strip-components=1
 #define PJMEDIA_HAS_WEBRTC_AEC3      1
 #define PJSUA_DEFAULT_CLOCK_RATE     48000
 #define PJSUA_DEFAULT_AUDIO_FRAME_PTIME 20
-#define PJMEDIA_SND_DEFAULT_REC_LATENCY  60
-#define PJMEDIA_SND_DEFAULT_PLAY_LATENCY 60
+/* WMME queues one 20 ms buffer per 20 ms of latency, so 60 ms left it three
+ * buffers: any scheduling hiccup underran playback and crackled while the
+ * other side talked (#11). These are pjproject's own defaults. */
+#define PJMEDIA_SND_DEFAULT_REC_LATENCY  100
+#define PJMEDIA_SND_DEFAULT_PLAY_LATENCY 140
 #define PJSUA_MAX_CALLS              4
 /* Outbound-only TLS: no listening socket on the client. */
 #define PJSIP_TLS_TRANSPORT_DONT_CREATE_LISTENER 1
