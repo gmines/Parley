@@ -16,7 +16,7 @@ use tauri_plugin_log::{RotationStrategy, Target, TargetKind, TimezoneStrategy};
 
 pub fn run() {
     tauri::Builder::default()
-        // Launching Parley again shows the running one (its window may be
+        // Launching PartyLine again shows the running one (its window may be
         // hidden in the background). Must be the first plugin.
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| window::show_main(app)))
         // Logs go to the OS log folder (About → Open logs folder), so testers
@@ -41,7 +41,7 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
             log::info!(
-                "Parley {} ({}) on {} {}",
+                "PartyLine {} ({}) on {} {}",
                 env!("CARGO_PKG_VERSION"),
                 env!("PARLEY_COMMIT"),
                 std::env::consts::OS,
@@ -124,7 +124,7 @@ pub fn run() {
             commands::mark_read,
         ])
         .build(tauri::generate_context!())
-        .expect("error while building Parley")
+        .expect("error while building PartyLine")
         .run(|_app, event| match event {
             tauri::RunEvent::Exit => voice::shutdown(),
             // Dock icon clicked while the window is hidden.

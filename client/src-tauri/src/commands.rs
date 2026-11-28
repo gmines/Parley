@@ -202,7 +202,7 @@ pub async fn fetch_me(state: State<'_, AppState>) -> Result<User> {
     Ok(user)
 }
 
-/// Invites someone to Parley by email. The server sends them an activation
+/// Invites someone to PartyLine by email. The server sends them an activation
 /// link; the invitee picks their own username. Requires the invites feature.
 #[tauri::command]
 pub async fn invite(state: State<'_, AppState>, email: String) -> Result<()> {

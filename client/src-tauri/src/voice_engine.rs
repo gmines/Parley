@@ -477,7 +477,7 @@ fn last_error() -> Option<String> {
 fn sound_error() -> String {
     let detail = last_error().unwrap_or_else(|| "couldn't open the microphone or speaker".into());
     if cfg!(target_os = "macos") {
-        format!("{detail}. Check that Parley is allowed to use the microphone in System Settings → Privacy & Security → Microphone.")
+        format!("{detail}. Check that PartyLine is allowed to use the microphone in System Settings → Privacy & Security → Microphone.")
     } else {
         detail
     }

@@ -24,13 +24,13 @@ function qrCanvas(setup: MfaSetup): HTMLCanvasElement {
  */
 export function mfaSetupView(onDone: (u: User) => void, onLogout: () => void, opts: { optional?: boolean } = {}): HTMLElement {
   const card = h("div", { class: "auth-card" }, h("p", { class: "hint", text: "Preparing setup…" }));
-  const brand = () => h("div", { class: "brand brand-lg", text: "Parley" });
+  const brand = () => h("div", { class: "brand brand-lg", text: "PartyLine" });
   const logout = () =>
     h("div", { class: "auth-links" }, h("button", { class: "link", attrs: { type: "button" }, text: opts.optional ? "Cancel" : "Log out", on: { click: onLogout } }));
 
   function showRecoveryCodes(user: User, codes: string[]) {
     const saved = h("input", { attrs: { type: "checkbox", id: "f-saved" } });
-    const finish = h("button", { class: "btn btn-primary btn-block", attrs: { type: "button", disabled: "" }, text: "Continue to Parley", on: { click: () => onDone(user) } });
+    const finish = h("button", { class: "btn btn-primary btn-block", attrs: { type: "button", disabled: "" }, text: "Continue to PartyLine", on: { click: () => onDone(user) } });
     saved.addEventListener("change", () => (finish.disabled = !saved.checked));
     const copy = h("button", {
       class: "btn btn-sm btn-ghost",

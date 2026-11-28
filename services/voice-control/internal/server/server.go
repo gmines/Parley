@@ -77,7 +77,7 @@ func (s *Server) list(w http.ResponseWriter, r *http.Request) error {
 }
 
 var errUpgradeRequired = httpx.NewError(http.StatusUpgradeRequired, "upgrade_required",
-	"This server only accepts encrypted calls. Update Parley to join calls.")
+	"This server only accepts encrypted calls. Update PartyLine to join calls.")
 
 // joinRequest is the optional body of a join: the SIP transports the client
 // supports. Clients that send none (before 0.4) only support "tcp".

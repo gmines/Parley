@@ -77,7 +77,7 @@ func TestStoreLayersOverEnvironment(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := s.PutEmail(ctx, Email{Mode: "smtp", Host: "smtp.example.org", Port: 587, TLS: "starttls",
-		Username: "mailer", Password: "hunter2-secret", From: "Parley <no-reply@example.org>"}, base.Recovery.AccountURL, "tester"); err != nil {
+		Username: "mailer", Password: "hunter2-secret", From: "PartyLine <no-reply@example.org>"}, base.Recovery.AccountURL, "tester"); err != nil {
 		t.Fatal(err)
 	}
 	fp1, _ := s.Fingerprint(ctx)

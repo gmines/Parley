@@ -29,7 +29,7 @@ export function aboutView(server: string | null, username: string, realtimeState
     }
 
     const rows: [string, string][] = [
-      ["Parley version", info.version],
+      ["PartyLine version", info.version],
       ["Build", info.commit],
       ["Operating system", `${OS_NAMES[info.os] ?? info.os} (${info.arch})`],
       ["WebView", info.webview_version ?? "unknown"],
@@ -68,7 +68,7 @@ export function aboutView(server: string | null, username: string, realtimeState
         "section",
         { class: "settings-section about-hero" },
         h("img", { class: "about-logo", attrs: { src: "/logo.svg", alt: "" } }),
-        h("div", {}, h("h2", { text: "Parley" }), h("p", { class: "hint", text: "Text and voice chat." }), h("p", { class: "about-version", text: `Version ${versionLabel(info)}` })),
+        h("div", {}, h("h2", { text: "PartyLine" }), h("p", { class: "hint", text: "Text and voice chat." }), h("p", { class: "about-version", text: `Version ${versionLabel(info)}` })),
       ),
       h("section", { class: "settings-section" }, h("h2", { text: "This app" }), kv(rows)),
       h("section", { class: "settings-section" }, h("h2", { text: "Connection" }), kv(serverRows)),

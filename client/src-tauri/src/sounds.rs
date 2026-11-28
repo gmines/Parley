@@ -117,7 +117,7 @@ fn user_error(message: &str) -> AppError {
     AppError::Api { code: "bad_sound".into(), message: message.into() }
 }
 
-const UNREADABLE: &str = "Parley couldn't read that file as audio. Use a WAV, MP3, OGG or FLAC file.";
+const UNREADABLE: &str = "PartyLine couldn't read that file as audio. Use a WAV, MP3, OGG or FLAC file.";
 
 /// Decodes `bytes` to mono samples at [`RATE`], at most `max_ms` long (and
 /// whether it was cut), with short fades at both ends.
@@ -169,7 +169,7 @@ pub fn decode(bytes: Vec<u8>, ext: Option<&str>, max_ms: usize) -> Result<(Vec<i
     let trimmed = mono.len() > limit;
     mono.truncate(limit);
     if mono.len() < rate as usize * MIN_MS / 1000 {
-        return Err(user_error("That sound is too short, or Parley couldn't read it."));
+        return Err(user_error("That sound is too short, or PartyLine couldn't read it."));
     }
 
     let mut out = resample(&mono, rate, RATE);

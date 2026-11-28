@@ -54,9 +54,9 @@ func TestHeaderInjectionRejected(t *testing.T) {
 }
 
 func TestSMTPRender(t *testing.T) {
-	s := &SMTP{From: "Parley <no-reply@example.org>"}
+	s := &SMTP{From: "PartyLine <no-reply@example.org>"}
 	out := string(s.render(Message{To: "a@example.org", Subject: "Your code", Body: "line1\nline2"}, "no-reply@example.org"))
-	for _, want := range []string{"From: Parley <no-reply@example.org>\r\n", "To: a@example.org\r\n", "Subject: Your code\r\n", "@example.org>\r\n", "\r\n\r\nline1\r\nline2\r\n"} {
+	for _, want := range []string{"From: PartyLine <no-reply@example.org>\r\n", "To: a@example.org\r\n", "Subject: Your code\r\n", "@example.org>\r\n", "\r\n\r\nline1\r\nline2\r\n"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("rendered message missing %q:\n%s", want, out)
 		}

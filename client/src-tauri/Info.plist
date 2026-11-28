@@ -3,6 +3,6 @@
 <plist version="1.0">
 <dict>
   <key>NSMicrophoneUsageDescription</key>
-  <string>Parley uses your microphone for voice calls.</string>
+  <string>PartyLine uses your microphone for voice calls.</string>
 </dict>
 </plist>

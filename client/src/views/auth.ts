@@ -33,7 +33,7 @@ export function authView(opts: AuthOptions): HTMLElement {
   stay.checked = opts.staySignedIn ?? true;
   const stayField = h(
     "label",
-    { class: "check", attrs: { for: "f-stay", title: "Keeps you signed in on this computer (for 30 days without using Parley). Uncheck on a shared computer." } },
+    { class: "check", attrs: { for: "f-stay", title: "Keeps you signed in on this computer (for 30 days without using PartyLine). Uncheck on a shared computer." } },
     stay,
     h("span", { text: "Stay signed in" }),
   );
@@ -110,7 +110,7 @@ export function authView(opts: AuthOptions): HTMLElement {
   const form = h(
     "form",
     { class: "auth-card" },
-    h("div", { class: "brand brand-lg", text: "Parley" }),
+    h("div", { class: "brand brand-lg", text: "PartyLine" }),
     title,
     info,
     server.field,
@@ -171,7 +171,7 @@ function mfaStep(stay: boolean, onAuthed: (u: User) => void, onBack: () => void)
   const form = h(
     "form",
     { class: "auth-card" },
-    h("div", { class: "brand brand-lg", text: "Parley" }),
+    h("div", { class: "brand brand-lg", text: "PartyLine" }),
     h("h1", { text: "Two-factor authentication" }),
     h("p", { class: "hint", text: "Enter the 6-digit code from your authenticator app. Lost it? Enter one of your recovery codes instead." }),
     code.field,
@@ -204,9 +204,9 @@ export function input(name: string, label: string, placeholder: string, value: s
   return { field, input: el };
 }
 
-/** Small "Parley 0.2.0 (abc123)" line, so testers can tell builds apart before logging in. */
+/** Small "PartyLine 0.2.0 (abc123)" line, so testers can tell builds apart before logging in. */
 function versionFooter(): HTMLElement {
   const el = h("p", { class: "auth-version" });
-  api.appInfo().then((i) => (el.textContent = `Parley ${versionLabel(i)}`)).catch(() => {});
+  api.appInfo().then((i) => (el.textContent = `PartyLine ${versionLabel(i)}`)).catch(() => {});
   return el;
 }

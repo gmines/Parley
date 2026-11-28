@@ -22,7 +22,7 @@ type SMTP struct {
 	Port        int
 	Username    string // empty disables AUTH
 	Password    string
-	From        string // e.g. "Parley <no-reply@example.org>"
+	From        string // e.g. "PartyLine <no-reply@example.org>"
 	ImplicitTLS bool
 	Timeout     time.Duration
 }

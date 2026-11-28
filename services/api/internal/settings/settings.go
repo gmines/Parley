@@ -1,5 +1,5 @@
 // Package settings stores the server settings an operator can change while
-// Parley runs (from the admin app), and layers them over the deployment's
+// PartyLine runs (from the admin app), and layers them over the deployment's
 // environment configuration.
 //
 // Each group (lockout, sessions, email, sms) is either absent, meaning the
@@ -394,7 +394,7 @@ func (s *Store) EmailSender(e Email, accountURL string) (delivery.Sender, error)
 		return nil, invalid("SMTP port must be between 1 and 65535")
 	}
 	if _, err := mail.ParseAddress(e.From); err != nil {
-		return nil, invalid(`"From" must be an address like no-reply@example.org or "Parley <no-reply@example.org>"`)
+		return nil, invalid(`"From" must be an address like no-reply@example.org or "PartyLine <no-reply@example.org>"`)
 	}
 	if strings.ContainsAny(e.From+e.Username, "\r\n") {
 		return nil, invalid("line breaks aren't allowed")

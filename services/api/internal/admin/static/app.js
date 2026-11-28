@@ -1,6 +1,6 @@
 "use strict";
 
-// Parley admin app. Plain DOM building only (no innerHTML), so nothing a user
+// PartyLine admin app. Plain DOM building only (no innerHTML), so nothing a user
 // typed into their profile can run here.
 
 const root = document.getElementById("root");
@@ -110,7 +110,7 @@ function showLogin(notice) {
   const err = h("p", { class: "error", role: "alert" });
   const go = h("button", { class: "primary", type: "submit", text: "Sign in" });
   const form = h("form", { class: "card login" },
-    h("h1", { text: "Parley Admin" }),
+    h("h1", { text: "PartyLine Admin" }),
     notice ? h("p", { class: "notice warn", text: notice }) : null,
     field("Username", username),
     field("Password", password),
@@ -141,7 +141,7 @@ function shell(active, ...content) {
   });
   root.replaceChildren(
     h("header", { class: "top" },
-      h("div", { class: "brand" }, "Parley ", h("span", { text: "Admin" })),
+      h("div", { class: "brand" }, "PartyLine ", h("span", { text: "Admin" })),
       h("nav", {}, link("#/users", "Users"), link("#/settings", "Settings"), link("#/audit", "Audit log"), link("#/account", "Your account")),
       h("div", { class: "who" }, h("span", { text: me.username }), out),
     ),
@@ -402,7 +402,7 @@ async function userPage(id) {
       : null;
     let state = "Not set up. MFA is optional for this account.";
     if (u.mfa_enabled) state = "An authenticator app is set up.";
-    else if (u.mfa_required) state = "Required but not set up yet: at their next sign-in or refresh they must set up an authenticator app before they can use Parley.";
+    else if (u.mfa_required) state = "Required but not set up yet: at their next sign-in or refresh they must set up an authenticator app before they can use PartyLine.";
     return h("section", { class: "card" },
       h("div", { class: "head" }, h("h2", { text: "Two-factor authentication" }), mfaChip(u)),
       h("p", { class: "muted", text: state }),
@@ -528,7 +528,7 @@ async function settingsPage() {
     const btn = h("button", {
       class: "primary", text: "Save",
       onclick: () => {
-        if (req.checked && !s.mfa.require && !confirm("Require MFA for everyone on the default policy? Users without an authenticator must set one up at their next refresh before they can keep using Parley.")) return;
+        if (req.checked && !s.mfa.require && !confirm("Require MFA for everyone on the default policy? Users without an authenticator must set one up at their next refresh before they can keep using PartyLine.")) return;
         save(btn, err, "mfa", { require: req.checked }, "MFA default saved.");
       },
     });
@@ -536,7 +536,7 @@ async function settingsPage() {
       h("h2", { text: "Two-factor authentication" }),
       s.mfa.meta ? h("p", { class: "hint", text: `Last changed ${fmtDate(s.mfa.meta.updated_at)} by ${s.mfa.meta.updated_by}` }) : null,
       h("label", { class: "inline" }, req, "Require MFA for all users"),
-      h("p", { class: "hint", text: "Applies to users whose policy is \"Use the server default\". Per-user overrides (on each user's page) win. When on, users without an authenticator must set up Google Authenticator or another TOTP app before they can use Parley. Users on an older client than 0.12 always see the setup screen until they enroll." }),
+      h("p", { class: "hint", text: "Applies to users whose policy is \"Use the server default\". Per-user overrides (on each user's page) win. When on, users without an authenticator must set up Google Authenticator or another TOTP app before they can use PartyLine. Users on an older client than 0.12 always see the setup screen until they enroll." }),
       err,
       h("div", { class: "actions" }, btn),
     );
@@ -605,7 +605,7 @@ async function settingsPage() {
     const tls = select(v.tls || "starttls", [["starttls", "STARTTLS (usually port 587)"], ["implicit", "Implicit TLS (usually port 465)"]]);
     const user = textInput(v.username, { autocomplete: "off" });
     const pass = h("input", { type: "password", autocomplete: "new-password", placeholder: v.has_password ? "Saved; leave blank to keep" : "" });
-    const from = textInput(v.from, { placeholder: "Parley <no-reply@example.org>" });
+    const from = textInput(v.from, { placeholder: "PartyLine <no-reply@example.org>" });
     const err = h("p", { class: "error", role: "alert" });
     const fields = h("div", {},
       h("div", { class: "row" }, field("SMTP host", host), field("Port", port)),

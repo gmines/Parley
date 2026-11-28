@@ -219,7 +219,7 @@ export function audioPanel(): { el: HTMLElement; dispose: () => void } {
     if (!testing) loadDevices(); // don't rescan under a running test
   };
   window.addEventListener("focus", onFocus);
-  // Also every few seconds, for devices plugged in while Parley has focus.
+  // Also every few seconds, for devices plugged in while PartyLine has focus.
   const rescan = window.setInterval(onFocus, 4000);
   loadDevices();
   render();
@@ -310,7 +310,7 @@ function soundPicker<T extends string>(opts: {
     try {
       const r = await api.soundImport(opts.slot, f);
       saveCustomSoundName(opts.slot, f.name);
-      showStatus(r.trimmed ? `It's longer than that: Parley plays the first ${Math.round(r.ms / 1000)} seconds.` : "");
+      showStatus(r.trimmed ? `It's longer than that: PartyLine plays the first ${Math.round(r.ms / 1000)} seconds.` : "");
       busy = false;
       choose("custom");
     } catch (e) {
@@ -389,7 +389,7 @@ export function messageSoundsPanel(): HTMLElement {
     h("div", { class: "range-row" }, h("label", { attrs: { for: "f-msg-vol" }, text: "Volume" }), volume, volumeLabel),
     h("p", {
       class: "hint",
-      text: "Plays on your speakers / headphones above, unless you're reading that conversation. A custom sound can be a WAV, MP3, OGG or FLAC file; Parley plays up to its first 5 seconds.",
+      text: "Plays on your speakers / headphones above, unless you're reading that conversation. A custom sound can be a WAV, MP3, OGG or FLAC file; PartyLine plays up to its first 5 seconds.",
     }),
   );
 }
@@ -468,7 +468,7 @@ export function callSoundsPanel(): HTMLElement {
     h("div", { class: "audio-actions" }, restore),
     h("p", {
       class: "hint",
-      text: "Plays on your speakers / headphones above. A custom sound can be a WAV, MP3, OGG or FLAC file; Parley loops up to its first 30 seconds.",
+      text: "Plays on your speakers / headphones above. A custom sound can be a WAV, MP3, OGG or FLAC file; PartyLine loops up to its first 30 seconds.",
     }),
   );
   render();
@@ -491,7 +491,7 @@ export function callSettingsPanel(): HTMLElement {
     h("label", { class: "field", attrs: { for: "f-auto-leave" } }, h("span", { text: "Leave a call when I'm away" }), away),
     h("p", {
       class: "hint",
-      text: "Away means no keyboard or mouse use and a silent microphone (on Linux, unless you use GNOME: while the screen is locked). Parley also leaves after 5 minutes alone in a call. Either way, you get a minute's warning to stay. Never turns both off.",
+      text: "Away means no keyboard or mouse use and a silent microphone (on Linux, unless you use GNOME: while the screen is locked). PartyLine also leaves after 5 minutes alone in a call. Either way, you get a minute's warning to stay. Never turns both off.",
     }),
   );
 }

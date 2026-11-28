@@ -47,7 +47,7 @@ export function accountView(
     );
   }
 
-  /** "Keep Parley running when the window is closed" (this computer only). */
+  /** "Keep PartyLine running when the window is closed" (this computer only). */
   function backgroundSection() {
     const box = h("input", { attrs: { type: "checkbox", id: "f-background" } });
     const hint = h("p", { class: "hint" });
@@ -55,7 +55,7 @@ export function accountView(
       "section",
       { class: "settings-section" },
       h("h2", { text: "This computer" }),
-      h("label", { class: "check", attrs: { for: "f-background" } }, box, h("span", { text: "Keep Parley running when the window is closed" })),
+      h("label", { class: "check", attrs: { for: "f-background" } }, box, h("span", { text: "Keep PartyLine running when the window is closed" })),
       hint,
     );
     section.hidden = true;
@@ -63,9 +63,9 @@ export function accountView(
     const explain = (on: boolean) =>
       (hint.textContent = on
         ? mac
-          ? "You'll still get calls and messages. Click Parley in the Dock to bring it back; quit with Parley → Quit Parley (⌘Q)."
-          : "You'll still get calls and messages. Click the Parley icon in the system tray to bring it back, or right-click it to quit."
-        : "Closing the window quits Parley.");
+          ? "You'll still get calls and messages. Click PartyLine in the Dock to bring it back; quit with PartyLine → Quit PartyLine (⌘Q)."
+          : "You'll still get calls and messages. Click the PartyLine icon in the system tray to bring it back, or right-click it to quit."
+        : "Closing the window quits PartyLine.");
     api
       .backgroundSetting()
       .then((s) => {

@@ -253,7 +253,7 @@ export function friendsView(
       "form",
       { class: "add-form" },
       h("h2", { text: "Invite someone" }),
-      h("p", { class: "hint", text: "Invite a friend by email. They'll get a link to join Parley and pick a username, and you'll be added as friends." }),
+      h("p", { class: "hint", text: "Invite a friend by email. They'll get a link to join PartyLine and pick a username, and you'll be added as friends." }),
       h("div", { class: "add-row" }, email, send),
       status,
     );

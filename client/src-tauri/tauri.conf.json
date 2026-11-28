@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Parley",
+  "productName": "PartyLine",
   "mainBinaryName": "parley",
-  "version": "0.13.1",
+  "version": "0.14.0",
   "identifier": "chat.parley.desktop",
   "build": {
     "beforeDevCommand": "npm run dev",
@@ -13,7 +13,7 @@
   "app": {
     "windows": [
       {
-        "title": "Parley",
+        "title": "PartyLine",
         "width": 1000,
         "height": 680,
         "minWidth": 640,
@@ -27,10 +27,10 @@
   "bundle": {
     "active": true,
     "targets": "all",
-    "publisher": "Parley",
+    "publisher": "PartyLine",
     "category": "SocialNetworking",
     "shortDescription": "Text and voice chat",
-    "longDescription": "Parley is a minimal, self-hostable chat app for text and reliable voice chat with your friends.",
+    "longDescription": "PartyLine is a minimal, self-hostable chat app for text and reliable voice chat with your friends.",
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
@@ -44,6 +44,12 @@
         "depends": [
           "libasound2",
           "libssl3"
+        ],
+        "conflicts": [
+          "parley"
+        ],
+        "replaces": [
+          "parley"
         ]
       },
       "rpm": {
@@ -51,6 +57,9 @@
         "depends": [
           "alsa-lib",
           "openssl-libs"
+        ],
+        "obsoletes": [
+          "parley"
         ]
       }
     },
@@ -62,6 +71,9 @@
       "webviewInstallMode": {
         "type": "downloadBootstrapper",
         "silent": true
+      },
+      "wix": {
+        "upgradeCode": "c9e093ae-0494-5d01-a7c5-fa5620f348d7"
       }
     },
     "macOS": {

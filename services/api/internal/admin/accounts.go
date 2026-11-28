@@ -1,4 +1,4 @@
-// Package admin is Parley's operator app: user management and server settings,
+// Package admin is PartyLine's operator app: user management and server settings,
 // served on a loopback-only address and reached through a tunnel
 // (kubectl port-forward). See README.md in the Helm chart.
 package admin
@@ -31,7 +31,7 @@ const (
 	maxLoginFailures = 5
 	loginWindow      = 15 * time.Minute
 	loginLock        = 15 * time.Minute
-	totpIssuer       = "Parley Admin"
+	totpIssuer       = "PartyLine Admin"
 )
 
 var (

@@ -30,7 +30,7 @@ type RecoveryConfig struct {
 	Email        delivery.Sender // required if EmailEnabled
 	SMS          delivery.Sender // required if SMSEnabled
 
-	AppName         string        // used in message text; default "Parley"
+	AppName         string        // used in message text; default "PartyLine"
 	CodeTTL         time.Duration // default 15m
 	MaxAttempts     int           // wrong guesses allowed per code; default 5
 	ResendInterval  time.Duration // minimum gap between codes; default 60s
@@ -54,7 +54,7 @@ type RecoveryConfig struct {
 
 func (c *RecoveryConfig) setDefaults() {
 	if c.AppName == "" {
-		c.AppName = "Parley"
+		c.AppName = "PartyLine"
 	}
 	if c.CodeTTL == 0 {
 		c.CodeTTL = 15 * time.Minute

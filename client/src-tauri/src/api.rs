@@ -1,4 +1,4 @@
-//! Wire types for the Parley REST API (api/openapi.yaml). They pass through to
+//! Wire types for the PartyLine REST API (api/openapi.yaml). They pass through to
 //! the UI unchanged, so field names stay snake_case on both sides.
 
 use chrono::{DateTime, Utc};

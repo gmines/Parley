@@ -1,8 +1,8 @@
-//! The main window's lifecycle. Closing the window hides it and Parley keeps
+//! The main window's lifecycle. Closing the window hides it and PartyLine keeps
 //! running, so calls and messages still arrive (unless the user turned
-//! "Keep Parley running" off). It comes back from the Dock (macOS), the tray
-//! icon (Windows, Linux), launching Parley again, or an incoming call.
-//! Quitting is Parley → Quit (⌘Q) on macOS and the tray's "Quit Parley"
+//! "Keep PartyLine running" off). It comes back from the Dock (macOS), the tray
+//! icon (Windows, Linux), launching PartyLine again, or an incoming call.
+//! Quitting is PartyLine → Quit (⌘Q) on macOS and the tray's "Quit PartyLine"
 //! elsewhere.
 
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -64,10 +64,10 @@ pub fn setup_tray(app: &tauri::App) {
     use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 
     let build = || -> tauri::Result<()> {
-        let open = MenuItem::with_id(app, "open", "Open Parley", true, None::<&str>)?;
-        let quit = MenuItem::with_id(app, "quit", "Quit Parley", true, None::<&str>)?;
+        let open = MenuItem::with_id(app, "open", "Open PartyLine", true, None::<&str>)?;
+        let quit = MenuItem::with_id(app, "quit", "Quit PartyLine", true, None::<&str>)?;
         let mut tray = TrayIconBuilder::with_id("main")
-            .tooltip("Parley")
+            .tooltip("PartyLine")
             .menu(&Menu::with_items(app, &[&open, &quit])?)
             .show_menu_on_left_click(false)
             .on_menu_event(|app, e| match e.id.as_ref() {

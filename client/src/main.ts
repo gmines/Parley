@@ -19,7 +19,7 @@ const root = document.getElementById("app")!;
 let teardown: (() => void) | null = null;
 
 async function start() {
-  mount(root, h("main", { class: "splash" }, h("div", { class: "brand brand-lg", text: "Parley" })));
+  mount(root, h("main", { class: "splash" }, h("div", { class: "brand brand-lg", text: "PartyLine" })));
   try {
     const user = await api.restoreSession();
     if (user) return enter(user);
@@ -96,8 +96,8 @@ function showApp(initialUser: User) {
   const accountNav = h("button", { class: "side-item", text: "Account", on: { click: () => go({ kind: "account" }) } });
   const audioNav = h("button", { class: "side-item", text: "Audio", on: { click: () => go({ kind: "audio" }) } });
   const aboutNav = h("button", { class: "side-item", text: "About", on: { click: () => go({ kind: "about" }) } });
-  const version = h("button", { class: "side-version", attrs: { title: "About Parley" }, on: { click: () => go({ kind: "about" }) } });
-  api.appInfo().then((i) => (version.textContent = `Parley ${versionLabel(i)}`)).catch(() => {});
+  const version = h("button", { class: "side-version", attrs: { title: "About PartyLine" }, on: { click: () => go({ kind: "about" }) } });
+  api.appInfo().then((i) => (version.textContent = `PartyLine ${versionLabel(i)}`)).catch(() => {});
   let realtimeState = "connecting";
   const dmList = h("nav", { class: "dm-list", attrs: { "aria-label": "Direct messages" } });
   const newGroup = h("button", {
@@ -152,7 +152,7 @@ function showApp(initialUser: User) {
   const sidebar = h(
     "aside",
     { class: "sidebar" },
-    h("div", { class: "brand", text: "Parley" }),
+    h("div", { class: "brand", text: "PartyLine" }),
     h("nav", { class: "side-nav" }, friendsNav, accountNav, audioNav, aboutNav),
     h("div", { class: "side-section" }, h("span", { text: "Direct messages" }), h("span", { class: "side-actions" }, newCall, newGroup)),
     dmList,

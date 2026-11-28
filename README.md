@@ -1,4 +1,4 @@
-# Parley (working name)
+# PartyLine
 
 A minimal, self-hostable alternative to Discord with two features: **text chat** and
 **reliable voice chat**, plus friends, friend requests and blocking.
@@ -69,7 +69,7 @@ End users get a normal installer for their OS. They never need Node, npm or Rust
 | OS | Installers |
 |---|---|
 | Linux | `.deb` (Debian/Ubuntu), `.rpm` (Fedora/RHEL), `.AppImage` (any distro, no install) |
-| Windows | `Parley_x.y.z_x64-setup.exe` (per-user, no admin rights), `.msi` |
+| Windows | `PartyLine_x.y.z_x64-setup.exe` (per-user, no admin rights), `.msi` |
 | macOS | universal `.dmg` (Apple Silicon + Intel), macOS 11+ |
 
 **Release builds (all platforms):** push a tag such as `client-v0.1.0`. `.github/workflows/client-release.yml` runs the tests, then builds on Linux, Windows and macOS runners and attaches the installers to a *draft* GitHub release. You can also start it by hand from the Actions tab and download the installers from the run's artifacts. Builds are unsigned until signing secrets are added, so Windows SmartScreen and macOS Gatekeeper will warn on first launch.
@@ -130,7 +130,7 @@ api/            OpenAPI spec and realtime event catalogue
 
 ## License
 
-Parley is licensed under the [GNU General Public License v2.0](LICENSE) (GPL-2.0-only).
+PartyLine is licensed under the [GNU General Public License v2.0](LICENSE) (GPL-2.0-only).
 The desktop client links [pjproject](https://github.com/pjsip/pjproject) (GPLv2) for
 voice. The server-side voice components run as separate programs under their
 own licenses: Kamailio (GPLv2), FreeSWITCH (MPL 1.1), sofia-sip and spandsp (LGPL 2.1).

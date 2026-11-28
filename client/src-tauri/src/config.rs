@@ -15,7 +15,7 @@ pub struct Config {
     /// The "Stay signed in" choice (default yes).
     #[serde(default)]
     pub stay_signed_in: Option<bool>,
-    /// Closing the window keeps Parley running in the background (default yes).
+    /// Closing the window keeps PartyLine running in the background (default yes).
     #[serde(default)]
     pub run_in_background: Option<bool>,
 }

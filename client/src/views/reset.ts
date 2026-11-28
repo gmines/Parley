@@ -14,7 +14,7 @@ export function resetView(
   const form = h(
     "form",
     { class: "auth-card" },
-    h("div", { class: "brand brand-lg", text: "Parley" }),
+    h("div", { class: "brand brand-lg", text: "PartyLine" }),
     h("h1", { text: "Reset your password" }),
     h("p", { class: "hint", text: "We'll send a link to the verified email or phone on your account." }),
     identifier.field,

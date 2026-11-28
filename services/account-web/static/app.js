@@ -40,7 +40,7 @@
     const pickUsername = !!info.pick_username;
     if (pickUsername) {
       $("title").textContent = "Create your account";
-      $("intro").textContent = "You were invited to Parley. Choose a username and a password.";
+      $("intro").textContent = "You were invited to PartyLine. Choose a username and a password.";
       $("namefields").hidden = false;
     } else {
       $("title").textContent = activating ? "Activate your account" : "Choose a new password";
@@ -71,7 +71,7 @@
         if (done.status === 204) {
           finish(
             activating ? "Your account is active" : "Password updated",
-            "Return to the Parley app and log in. You'll be asked for your authenticator code, or to set one up.",
+            "Return to the PartyLine app and log in. You'll be asked for your authenticator code, or to set one up.",
           );
           return;
         }
