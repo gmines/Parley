@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "PartyLine",
-  "mainBinaryName": "parley",
-  "version": "0.14.1",
+  "mainBinaryName": "partyline",
+  "version": "0.14.2",
   "identifier": "chat.parley.desktop",
   "build": {
     "beforeDevCommand": "npm run dev",
